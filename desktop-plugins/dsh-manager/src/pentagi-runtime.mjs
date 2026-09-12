@@ -17,6 +17,9 @@ const EXTRA_PATH = [
   join(process.env.ProgramFiles || 'C:\\Program Files', 'Docker', 'Docker', 'resources', 'bin'),
   join(process.env.ProgramFiles || 'C:\\Program Files', 'Docker', 'Docker'),
   join(process.env.LOCALAPPDATA || '', 'Docker', 'resources', 'bin'),
+  join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WindowsApps'),
+  join(process.env.SystemRoot || 'C:\\Windows', 'System32'),
+  join(process.env.SystemRoot || 'C:\\Windows', 'SysWOW64'),
 ]
 const DEFAULT_PENTEST_IMAGE = 'vxcontrol/kali-linux'
 const DEFAULT_ADMIN = 'admin@pentagi.com'
@@ -419,17 +422,40 @@ async function downloadFile(url, dest, onLog) {
   throw new Error(curlRun.stderr || 'https and curl download both failed')
 }
 
+async function downloadFileWithPowershell(url, dest, onLog, env) {
+  mkdirSync(dirname(dest), { recursive: true })
+  onLog(`PowerShell 下载 ${url}`)
+  const ps = which('powershell', env)
+  const script = `try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '${url.replace(/'/g, "''")}' -OutFile '${dest.replace(/'/g, "''")}' -UseBasicParsing } catch { Write-Error $_; exit 1 }`
+  const downloaded = await run(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    timeoutMs: 15 * 60_000,
+    env,
+    onLog,
+  })
+  if (downloaded.ok && existsSync(dest) && statSync(dest).size > 1024 * 1024) {
+    onLog(`PowerShell 已写入 ${dest} (${(statSync(dest).size / 1024 / 1024).toFixed(1)} MiB)`)
+    return dest
+  }
+  throw new Error(downloaded.stderr || downloaded.stdout || 'powershell download failed')
+}
+
 async function installWindowsDockerWithWinget(onLog, env) {
   const winget = which('winget', env)
   if (!existsSync(winget)) return { ok: false, error: 'winget not found' }
-  onLog('$ winget install Docker.DockerDesktop')
-  const installed = await run(winget, [
+  onLog(`$ ${winget} install Docker.DockerDesktop`)
+  const args = [
     'install', '-e', '--id', 'Docker.DockerDesktop',
     '--accept-package-agreements', '--accept-source-agreements',
-    '--disable-interactivity', '--silent',
-  ], { timeoutMs: 20 * 60_000, env, onLog })
+    '--disable-interactivity',
+  ]
+  let installed = await run(winget, [...args, '--silent'], { timeoutMs: 20 * 60_000, env, onLog })
+  if (!installed.ok && !dockerDesktopInstalled()) {
+    onLog('winget --silent 失败，去掉 silent 再试…')
+    installed = await run(winget, args, { timeoutMs: 20 * 60_000, env, onLog })
+  }
   if (installed.ok || dockerDesktopInstalled()) return { ok: true, via: 'winget' }
-  return { ok: false, error: installed.stderr || installed.stdout || 'winget install failed' }
+  const detail = (installed.stderr || installed.stdout || 'winget install failed').slice(-800)
+  return { ok: false, error: detail }
 }
 
 async function installWindowsDockerWithChoco(onLog, env) {
@@ -452,6 +478,14 @@ async function installWindowsDockerFromInstaller(onLog, env) {
     } catch (error) {
       lastError = String(error?.message ?? error)
       onLog(`下载失败：${lastError}`)
+      try {
+        await downloadFileWithPowershell(url, installer, onLog, env)
+        lastError = ''
+        break
+      } catch (psError) {
+        lastError = String(psError?.message ?? psError)
+        onLog(`PowerShell 下载失败：${lastError}`)
+      }
     }
   }
   if (lastError || !existsSync(installer) || statSync(installer).size < 1024 * 1024) {

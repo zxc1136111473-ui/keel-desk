@@ -90,6 +90,7 @@ function migrateLegacyFile(destPath, legacyPath) {
 
 let taskLogs = []
 let isRunning = false
+let runningTask = ''
 
 /**
  * 会话破甲开关的内存态：{ [sessionId]: { enabled, model } }，与 coldbrewStatePath 双向同步。
@@ -794,6 +795,7 @@ export function apply(ctx) {
               res.end(JSON.stringify({ error: String(error?.message ?? error), logs: taskLogs }))
             } finally {
               isRunning = false
+              runningTask = ''
             }
             return
           }
@@ -810,11 +812,21 @@ export function apply(ctx) {
           const sub = segments[3] ?? 'status'
           if (sub === 'start' || sub === 'stop') {
             if (isRunning) {
-              res.writeHead(409)
-              res.end('Task already running')
+              res.writeHead(409, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                error: runningTask === 'docker-install'
+                  ? '正在安装 Docker，请等当前任务结束（可看下面日志）。'
+                  : runningTask === 'embedder'
+                    ? '本机向量还在安装/启动，请等它完成后再启动后端。'
+                    : `已有任务在跑（${runningTask || 'unknown'}），请稍后再试。`,
+                logs: taskLogs,
+                runningTask,
+                isRunning: true,
+              }))
               return
             }
             isRunning = true
+            runningTask = sub
             taskLogs = []
             try {
               taskLogs.push(sub === 'start' ? 'start pentagi docker compose…' : 'stop pentagi docker compose…')
@@ -835,12 +847,13 @@ export function apply(ctx) {
               res.end(JSON.stringify({ error: String(error?.message ?? error), logs: taskLogs }))
             } finally {
               isRunning = false
+              runningTask = ''
             }
             return
           }
           if (sub === 'logs') {
             res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ logs: taskLogs, isRunning }))
+            res.end(JSON.stringify({ logs: taskLogs, isRunning, runningTask }))
             return
           }
           if (sub === 'config') {
@@ -890,11 +903,17 @@ export function apply(ctx) {
           }
           if (sub === 'sync-models') {
             if (isRunning) {
-              res.writeHead(409)
-              res.end('Task already running')
+              res.writeHead(409, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                error: `已有任务在跑（${runningTask || 'unknown'}），请稍后再同步模型。`,
+                logs: taskLogs,
+                runningTask,
+                isRunning: true,
+              }))
               return
             }
             isRunning = true
+            runningTask = 'sync-models'
             try {
               let body = ''
               for await (const chunk of req) body += chunk
@@ -925,40 +944,65 @@ export function apply(ctx) {
               res.end(JSON.stringify({ error: String(error?.message ?? error) }))
             } finally {
               isRunning = false
+              runningTask = ''
             }
             return
           }
           if (sub === 'docker-install') {
             if (isRunning) {
-              res.writeHead(409)
-              res.end('Task already running')
+              const same = runningTask === 'docker-install'
+              res.writeHead(same ? 200 : 409, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                ok: same,
+                error: same
+                  ? undefined
+                  : (runningTask === 'embedder'
+                    ? '本机向量还在安装/启动。等它完成（或点停止本机向量）后再装 Docker。'
+                    : `已有任务在跑（${runningTask || 'unknown'}），请稍后再试。`),
+                logs: taskLogs,
+                runningTask,
+                isRunning: true,
+              }))
               return
             }
             isRunning = true
+            runningTask = 'docker-install'
             taskLogs = ['检查本机 Docker / 架构并安装依赖…']
             try {
               const result = await installDockerStack((line) => {
                 taskLogs.push(line)
                 if (taskLogs.length > 400) taskLogs = taskLogs.slice(-300)
               }, process.env, { pullImages: true })
+              const status = await probePentagi()
+              const error = result.ok ? undefined : (result.error || status.error || 'Docker 安装失败')
+              if (error) taskLogs.push(error)
               res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ ...await probePentagi(), ...result, logs: taskLogs, error: result.ok ? undefined : result.error }))
+              res.end(JSON.stringify({ ...status, ...result, logs: taskLogs, error }))
             } catch (error) {
               taskLogs.push(String(error?.message ?? error))
               res.writeHead(500, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ error: String(error?.message ?? error), logs: taskLogs }))
             } finally {
               isRunning = false
+              runningTask = ''
             }
             return
           }
           if (sub === 'embedder') {
             if (isRunning) {
-              res.writeHead(409)
-              res.end('Task already running')
+              res.writeHead(409, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                error: runningTask === 'docker-install'
+                  ? '正在安装 Docker，请等当前任务结束后再启停本机向量。'
+                  : `已有任务在跑（${runningTask || 'unknown'}），请稍后再试。`,
+                logs: taskLogs,
+                runningTask,
+                isRunning: true,
+              }))
               return
             }
             isRunning = true
+            runningTask = 'embedder'
             try {
               let body = ''
               for await (const chunk of req) body += chunk
@@ -994,6 +1038,7 @@ export function apply(ctx) {
               res.end(JSON.stringify({ error: String(error?.message ?? error), logs: taskLogs }))
             } finally {
               isRunning = false
+              runningTask = ''
             }
             return
           }

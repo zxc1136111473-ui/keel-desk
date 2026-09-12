@@ -958,6 +958,8 @@ function PentagiSection() {
     }
   }
 
+  const runningLooksLikeDocker = (data: { runningTask?: string }) => data.runningTask === 'docker-install'
+
   const installDocker = async () => {
     setBusy(true)
     setLogs(['检查本机架构并安装 Docker（Windows 装 Docker Desktop，macOS 走 Colima），随后拉取 PentAGI 镜像…'])
@@ -966,11 +968,17 @@ function PentagiSection() {
       const res = await fetch('/api/coldbrew/pentagi/docker-install', { method: 'POST' })
       const data = await res.json().catch(() => ({}))
       if (Array.isArray(data.logs) && data.logs.length > 0) setLogs(data.logs)
-      if (!res.ok) throw new Error(data.error ?? 'Docker 安装失败')
+      const detail = String(data.error || '').trim()
+      if (data.isRunning && runningLooksLikeDocker(data)) {
+        showToast('Docker 正在安装，看下面日志即可，不必连点')
+        return
+      }
+      if (!res.ok) throw new Error(detail || `HTTP ${res.status}`)
       setPentagi(data)
       showToast('Docker 依赖已就绪，可以启动 PentAGI 后端')
     } catch (error: any) {
-      showToast(`Docker 安装失败: ${error.message}`)
+      const text = String(error?.message ?? error)
+      showToast(text.length > 80 ? `Docker 安装失败：${text.slice(0, 80)}…` : `Docker 安装失败：${text}`)
     } finally {
       if (pollTimer.current) {
         clearInterval(pollTimer.current)

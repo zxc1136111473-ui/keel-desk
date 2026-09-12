@@ -1345,7 +1345,10 @@ export function flowFilesRestPath(flowId, suffix = '') {
   return `${base}${String(suffix).replace(/^\/+/, '')}`
 }
 
-/** Host Tor SOCKS (and Browser SOCKS) — Kali 127.0.0.1 is the container, not the Mac. */
+/** Host Tor SOCKS (and Browser SOCKS) — Kali 127.0.0.1 is the container, not the Mac.
+ *  socat keeps SOCKS usernames intact, so IsolateSOCKSAuth still opens separate circuits.
+ *  That does NOT isolate a target rate-limit bucket keyed on exit IP: same exit shares remaining.
+ *  Probe remaining+exit before assuming extra tries. Literal `cN` is a placeholder (use c1/c2/c3). */
 export const HOST_LOOPBACK_FORWARD_PORTS = [9050, 9150]
 export const SANDBOX_CONTAINER_NAME = 'dsh-kali-sandbox'
 

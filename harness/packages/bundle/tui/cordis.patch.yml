@@ -1,0 +1,35 @@
+# The dsh-tui bundle patch: interactive REPL mode directly over dsh-base.
+# It mounts no Host, HTTP server, Web runtime, or browser plugin. A startup
+# provider injects `cmdlineArgs` and publishes `tuiStartup`, then the
+# `tui-runner` plugin creates one persistent Agent per session and accepts
+# follow-up user turns from stdin until /quit.
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+# The shared module-reload HMR row stays off; the launcher's watch-only
+# fallback still keeps the user patch layers live until the run exits.
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # Code Mode is a core execution capability, not a Web component.
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+    - id: tui-startup
+      name: '@deepseek-ai/dsh-tui/startup'
+
+    # Reads session and initial task from the ordinary tuiStartup provider.
+    - id: tui-runner
+      name: '@deepseek-ai/dsh-tui'
+      inject: [tuiStartup]
+      config:
+        sessionId: !!js ctx.tuiStartup.sessionId
+        initialTask: !!js ctx.tuiStartup.initialTask

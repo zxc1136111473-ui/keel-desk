@@ -52,6 +52,9 @@ export const apply = ctx => globalThis.__tuiStartupApply(ctx)
     '  config:',
     '    sessionId: !!js ctx.tuiStartup.sessionId',
     '    initialTask: !!js ctx.tuiStartup.initialTask',
+    '    provider: !!js ctx.tuiStartup.provider',
+    '    model: !!js ctx.tuiStartup.model',
+    '    check: !!js ctx.tuiStartup.check',
     '- id: tui-startup',
     `  name: ${pathToFileURL(join(dir, 'startup.mjs')).href}`,
     '',
@@ -80,17 +83,30 @@ export const apply = ctx => globalThis.__tuiStartupApply(ctx)
 }
 
 describe('tui command-line provider', () => {
+  const BASE = { sessionId: '', initialTask: '', provider: '', model: '', check: false }
+
   it('bare invocation starts a fresh session with no initial task', async () => {
     const { values, observed } = await bootStartup([])
-    expect(values).toEqual({ sessionId: '', initialTask: '' })
-    expect(observed.runnerConfig).toEqual({ sessionId: '', initialTask: '' })
+    expect(values).toEqual(BASE)
+    expect(observed.runnerConfig).toMatchObject({ sessionId: '', initialTask: '' })
     expect(observed.exits).toEqual([])
   })
 
   it('carries --session and --task into the runner config', async () => {
     const { values, observed } = await bootStartup(['--session', 'abc', '--task', 'recon the target'])
-    expect(values).toEqual({ sessionId: 'abc', initialTask: 'recon the target' })
-    expect(observed.runnerConfig).toEqual({ sessionId: 'abc', initialTask: 'recon the target' })
+    const expected = { ...BASE, sessionId: 'abc', initialTask: 'recon the target' }
+    expect(values).toEqual(expected)
+    expect(observed.runnerConfig).toMatchObject({ sessionId: 'abc', initialTask: 'recon the target' })
+    expect(observed.exits).toEqual([])
+  })
+
+  it('carries --provider, --model and --check into the runner config', async () => {
+    const { values, observed } = await bootStartup(['--provider', 'kiro', '--model', 'claude-opus-4.8', '--check'])
+    const expected = { ...BASE, provider: 'kiro', model: 'claude-opus-4.8', check: true }
+    expect(values).toEqual(expected)
+    expect(observed.runnerConfig).toMatchObject({
+      sessionId: '', initialTask: '', provider: 'kiro', model: 'claude-opus-4.8', check: true,
+    })
     expect(observed.exits).toEqual([])
   })
 

@@ -32,11 +32,20 @@ export interface Config {
   sessionId?: string
   /** Optional initial task submitted before the REPL prompt. */
   initialTask?: string
+  /** Provider route override; empty keeps the settings default. */
+  provider?: string
+  /** Model id override; empty keeps the settings default. */
+  model?: string
+  /** Print the loaded plugin/tool inventory and exit without entering the REPL. */
+  check?: boolean
 }
 
 export const Config: z<Config> = z.object({
   sessionId: z.string().default(''),
   initialTask: z.string().default(''),
+  provider: z.string().default(''),
+  model: z.string().default(''),
+  check: z.boolean().default(false),
 })
 
 /** Why one REPL session ended. */
@@ -126,12 +135,26 @@ async function runSession(ctx: Context, config: Config, io: TuiIo): Promise<Repl
   const sessionId = SessionId(requested === '' ? `session-${randomUUID()}` : requested)
   io.stdout.write(`(session ${sessionId})\n`)
 
+  // Flag overrides win over the settings default; each side falls back
+  // independently so `--provider kiro` alone keeps the default model id.
+  const provider = String(config.provider ?? '').trim() || selection.provider
+  const model = String(config.model ?? '').trim() || selection.model
+  // A CLI override drops the settings' reasoning effort: that effort was
+  // chosen for the settings default model and may not exist on the target
+  // (e.g. max on a non-thinking provider). The provider default applies.
+  const effective = (config.provider || config.model)
+    ? { provider, model }
+    : { ...selection, provider, model }
+  if (config.provider || config.model) {
+    io.stdout.write(`(model ${provider}/${model})\n`)
+  }
+
   const { agent } = await agents.create({
     sessionId,
     meta: { cwd: process.cwd() },
-    agentOptions: selection ? { provider: selection.provider, model: selection.model } : {},
+    agentOptions: effective ? { provider: effective.provider, model: effective.model } : {},
     setup: (agentCtx) => {
-      const selected: ModelSelectionRef = { current: selection, assembled: undefined }
+      const selected: ModelSelectionRef = { current: effective, assembled: undefined }
       installModelSelection(agentCtx, selected)
     },
   })
@@ -215,6 +238,57 @@ function fail(io: TuiIo, error: unknown): void {
 }
 
 /**
+ * Print the loaded plugin inventory (loader entries with activation status)
+ * and the registered tool list, then request exit.
+ * @param ctx - settled plugin context.
+ * @param io - process-facing effects.
+ */
+function runCheck(ctx: Context, io: TuiIo): void {
+  const loader = ctx.get('loader')
+  const tools = ctx.get('tools')
+  const defaultModel = ctx.get('agentDefaultModel')
+
+  const selection = defaultModel?.currentSelection()
+  io.stdout.write(`model: ${selection?.provider}/${selection?.model}\n`)
+  io.stdout.write(`tools (registered): ${tools?.schemas().length ?? 0}\n`)
+
+  let activated = 0
+  let pending = 0
+  let disabled = 0
+
+  if (loader !== undefined) {
+    io.stdout.write('\nplugins:\n')
+    for (const entry of loader.entries()) {
+      const status = entry.disabled
+        ? 'disabled'
+        : entry.fiber !== undefined
+          ? 'active'
+          : 'pending'
+      if (status === 'active') activated += 1
+      else if (status === 'pending') pending += 1
+      else disabled += 1
+      io.stdout.write(`  ${status.padEnd(8)} ${entry.id}`)
+      if (entry.options.name !== undefined && entry.options.name !== entry.id) {
+        io.stdout.write(`  (${entry.options.name})`)
+      }
+      io.stdout.write('\n')
+    }
+    io.stdout.write(`\nactivated ${activated}, pending ${pending}, disabled ${disabled}\n`)
+  }
+
+  if (tools !== undefined) {
+    io.stdout.write('\nregistered tools:\n')
+    for (const tool of tools.schemas()) {
+      io.stdout.write(`  ${tool.name}\n`)
+    }
+  }
+
+  // A clean check prints everything and exits 0; a failed inventory is
+  // invisible because boot already failed before apply() ran.
+  io.exit(0)
+}
+
+/**
  * Drive the REPL until the user quits; `/new` relaunches a fresh session.
  * @param ctx - plugin context carrying core services and the launcher-provided exit request.
  * @param config - validated boot config (sessionId reused only for the first session).
@@ -228,13 +302,28 @@ export function apply(ctx: Context, config: Config): void {
 
   const io: TuiIo = { stdout: internals.stdout, stderr: internals.stderr, stdin: internals.stdin, exit }
 
+  if (config.check === true) {
+    // Print the inventory once the tree settles, then exit without a REPL.
+    void (async () => {
+      await ctx.get('loader')?.await()
+      runCheck(ctx, io)
+    })().catch((error: unknown) => { fail(io, error) })
+    return
+  }
+
   const drive = async (): Promise<void> => {
     let sessionConfig = config
     for (;;) {
       const reason = await runSession(ctx, sessionConfig, io)
       if (reason === 'new') {
-        // Fresh identity per /new; the initial task only applies to the first session.
-        sessionConfig = { sessionId: '', initialTask: '' }
+        // Fresh identity per /new; the initial task only applies to the
+        // first session, but provider/model overrides persist.
+        sessionConfig = {
+          sessionId: '',
+          initialTask: '',
+          provider: String(config.provider ?? ''),
+          model: String(config.model ?? ''),
+        }
         continue
       }
       io.exit(reason === 'quit' ? 0 : 0)

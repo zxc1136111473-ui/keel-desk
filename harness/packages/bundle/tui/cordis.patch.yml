@@ -26,10 +26,14 @@
     - id: tui-startup
       name: '@deepseek-ai/dsh-tui/startup'
 
-    # Reads session and initial task from the ordinary tuiStartup provider.
+    # Reads session, initial task, model overrides, and the check flag from
+    # the ordinary tuiStartup provider.
     - id: tui-runner
       name: '@deepseek-ai/dsh-tui'
       inject: [tuiStartup]
       config:
         sessionId: !!js ctx.tuiStartup.sessionId
         initialTask: !!js ctx.tuiStartup.initialTask
+        provider: !!js ctx.tuiStartup.provider
+        model: !!js ctx.tuiStartup.model
+        check: !!js ctx.tuiStartup.check

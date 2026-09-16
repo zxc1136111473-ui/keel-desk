@@ -36,7 +36,7 @@ import {
 import { snapshotHarnessLlms, inspectHarnessLlms, pickHarnessLlm, applyLlmToEnvText, syncGraphqlProviders } from './pentagi-providers.mjs'
 
 export const name = 'dsh-desktop-manager'
-export const inject = ['webServer', 'loader', 'systemPrompt', 'tools']
+export const inject = ['loader', 'systemPrompt', 'tools']
 export { ARMOR_MODES, DEFAULT_ARMOR_MODE, normalizeArmorMode }
 
 const repositoryRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
@@ -1151,6 +1151,20 @@ export function apply(ctx) {
 
               taskLogs.push('=== 全部安装完成 ===')
               setTaskProgress(3, 3, '全部安装完成', 100)
+              // 激活 PentAGI：新装机器默认 armorMode 是 coldbrew（不引导 pg_* 工具），
+              // 安装完成后强制切到 pentagi 内核，模型才会主动调用 pg_* 工具。
+              try {
+                const s = await getSettings()
+                s.coldbrew ??= {}
+                if (s.coldbrew.armorMode !== 'pentagi') {
+                  s.coldbrew.armorMode = 'pentagi'
+                  if (s.coldbrew.defaultEnabled !== true) s.coldbrew.defaultEnabled = true
+                  await saveSettings(s)
+                  log('已激活 PentAGI 模式（armorMode=pentagi）· 模型将自动调用 pg_* 工具')
+                }
+              } catch (err) {
+                log(`激活 PentAGI 模式失败（可手动在设置页切换）: ${err?.message ?? err}`)
+              }
               const finalStatus = await probePentagi()
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ ...finalStatus, logs: taskLogs, installed: true, progress: taskProgressView() }))

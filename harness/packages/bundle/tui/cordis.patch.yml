@@ -23,6 +23,13 @@
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
+    # Same roster the desktop GUI uses. apps/cli composeProfile patches in
+    # the shipped config/agent-presets root when this row is present.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
     - id: tui-startup
       name: '@deepseek-ai/dsh-tui/startup'
 

@@ -30,6 +30,15 @@
       "path": "../../core/session"
     },
     {
+      "path": "../../session/session-projection"
+    },
+    {
+      "path": "../../llm/token-meter"
+    },
+    {
+      "path": "../../compaction/compaction"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     },
     {
@@ -46,6 +55,15 @@
     },
     {
       "path": "../../goal/goal"
+    },
+    {
+      "path": "../../attachment/attachment"
+    },
+    {
+      "path": "../../preset/agent-presets"
+    },
+    {
+      "path": "../../interaction/permission-presets"
     }
   ]
 }

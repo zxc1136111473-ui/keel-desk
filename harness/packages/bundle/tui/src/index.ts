@@ -10,7 +10,9 @@
 import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-attachment'
 import { createInterface } from 'node:readline'
 import type { Interface, ReadLineOptions } from 'node:readline'
 import type { Context } from '@deepseek-ai/cordis'
@@ -20,14 +22,105 @@ import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-goal'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-permission-presets'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { settingsNamespace, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SessionId } from '@deepseek-ai/dsh-session'
-
-const LLM_PI_AI_NS = 'llm-pi-ai' as SettingsNamespace
 import type { SessionEvent, Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
+import type {} from '@deepseek-ai/dsh-session-projection'
+import type { ContextPressureProjection } from '@deepseek-ai/dsh-token-meter/client'
+import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
+
+const LLM_PI_AI_NS = 'llm-pi-ai' as SettingsNamespace
+const AGENT_PRESET_NS = settingsNamespace('agent-presets')
+const PERMISSION_NS = settingsNamespace('permission')
+
+/* -------------------------------------------------------------------------- */
+/*  Local memory store (file-based, independent of plugin memory tool)        */
+/* -------------------------------------------------------------------------- */
+
+interface MemoryEntry { id: string; content: string; scene?: string; type?: string; ts: number }
+interface MemoryFile { entries: MemoryEntry[] }
+
+function memoryPath(): string {
+  const base = String(process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
+  return join(base, 'tui-memory.json')
+}
+
+function isMemoryEntry(value: unknown): value is MemoryEntry {
+  if (value === null || typeof value !== 'object') return false
+  const entry = value as MemoryEntry
+  return typeof entry.id === 'string' && typeof entry.content === 'string' && typeof entry.ts === 'number'
+}
+
+function loadMemory(): MemoryFile {
+  try {
+    const d: unknown = JSON.parse(readFileSync(memoryPath(), 'utf8'))
+    // Historical files were a bare array. Array.entries is a method, so never
+    // treat `d.entries` as the store when `d` itself is the list.
+    if (Array.isArray(d)) return { entries: d.filter(isMemoryEntry) }
+    if (d !== null && typeof d === 'object' && Array.isArray((d as MemoryFile).entries)) {
+      return { entries: (d as MemoryFile).entries.filter(isMemoryEntry) }
+    }
+    return { entries: [] }
+  } catch { return { entries: [] } }
+}
+
+function saveMemory(store: MemoryFile): void {
+  writeFileSync(memoryPath(), JSON.stringify({ entries: store.entries }, null, 2))
+}
+
+function memorySearch(store: MemoryFile, query: string, io: TuiIo): void {
+  if (!query) { io.stdout.write('(用法: /memory search <关键词>)\n'); return }
+  const q = query.toLowerCase()
+  const hits = store.entries.filter(e => e.content.toLowerCase().includes(q)).sort((a, b) => b.ts - a.ts).slice(0, 8)
+  if (!hits.length) { io.stdout.write('无匹配记忆。\n'); return }
+  io.stdout.write(`找到 ${hits.length} 条：\n`)
+  for (const e of hits) io.stdout.write(`[${e.id}] ${e.type ?? 'fact'} · ${new Date(e.ts).toLocaleString()}\n  ${clip(e.content, 100)}\n`)
+}
+
+function memoryAdd(store: MemoryFile, line: string, io: TuiIo): void {
+  const content = line.replace(/^\/memory\s+add\s*/i, '').trim()
+  if (!content) { io.stdout.write('(用法: /memory add <内容>)\n'); return }
+  const entry: MemoryEntry = { id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, content, type: 'fact', ts: Date.now() }
+  store.entries.push(entry); saveMemory(store)
+  io.stdout.write(`已存储 [${entry.id}]：${clip(content, 80)}\n`)
+}
+
+function memoryList(store: MemoryFile, io: TuiIo): void {
+  if (!store.entries.length) { io.stdout.write('无记忆。\n'); return }
+  io.stdout.write(`共 ${store.entries.length} 条记忆：\n`)
+  for (const e of store.entries.slice(-10)) io.stdout.write(`[${e.id}] ${e.type ?? 'fact'} · ${new Date(e.ts).toLocaleString()} · ${clip(e.content, 90)}\n`)
+}
+
+function memoryForget(store: MemoryFile, line: string, io: TuiIo): void {
+  const id = line.replace(/^\/memory\s+(?:forget|delete)\s*/i, '').trim()
+  if (!id) { io.stdout.write('(用法: /memory delete <id>)\n'); return }
+  const idx = store.entries.findIndex(e => e.id === id || e.id.startsWith(id))
+  if (idx === -1) { io.stdout.write(`未找到记忆 ${id}\n`); return }
+  const removed = store.entries.splice(idx, 1)[0]
+  if (removed === undefined) { io.stdout.write(`未找到记忆 ${id}\n`); return }
+  saveMemory(store)
+  io.stdout.write(`已删除 [${removed.id}]：${clip(removed.content, 60)}\n`)
+}
+
+function agentPresetLabel(id: string): string {
+  if (id === 'standard') return '标准模式'
+  if (id === 'code') return 'PTC 模式'
+  if (id === 'minimal') return '极简模式'
+  if (id === 'cordis') return '创造模式'
+  return id
+}
+
+function permissionLabel(id: string): string {
+  if (id === 'danger-full-access') return 'Full access'
+  if (id === 'workspace-write') return 'workspace-write'
+  if (id === 'read-only') return 'read-only'
+  return id
+}
 
 /** Stable Cordis plugin name. */
 export const name = 'tui-runner'
@@ -98,13 +191,21 @@ interface ProviderCatalog {
   modelsByProvider: Map<string, string[]>
 }
 
+interface EffortChoice {
+  id?: string
+  label: string
+}
+
 /** REPL menu state owned by one session. */
 interface MenuState {
-  stage: 'off' | 'provider' | 'model' | 'skill' | 'armor'
+  stage: 'off' | 'provider' | 'model' | 'effort' | 'skill' | 'armor' | 'preset' | 'permission'
   providers: string[]
   models: string[]
   provider: string
+  efforts: EffortChoice[]
   reachable: Map<string, boolean>
+  presetIds: string[]
+  permissionIds: string[]
 }
 
 /**
@@ -213,9 +314,47 @@ function renderModelMenuForProvider(ctx: Context, io: TuiIo, menu: MenuState, pr
   menu.models = models
   io.stdout.write(`\n选择 ${provider} 的模型（输入编号，0 返回接口商）：\n`)
   io.stdout.write(`  当前: ${current?.provider}/${current?.model}\n`)
+  io.stdout.write('  快速 / 1M 是不同模型 id，选中后再选思考档。\n')
   models.forEach((model, index) => {
     const mark = provider === current?.provider && model === current?.model ? ' *' : ''
-    io.stdout.write(`  ${String(index + 1).padStart(2)}. ${model}${mark}\n`)
+    io.stdout.write(`  ${String(index + 1).padStart(2)}. ${model}${modelHint(model)}${mark}\n`)
+  })
+  io.stdout.write('   0. 返回\n')
+}
+
+function modelHint(model: string): string {
+  const tags: string[] = []
+  const lower = model.toLowerCase()
+  if (lower.includes('flash') || lower.includes('fast') || lower.includes('lite') || lower.includes('mini')) tags.push('快速')
+  if (lower.includes('1m') || lower.includes('million') || /[-_]1m\b/.test(lower)) tags.push('1M')
+  else if (lower.includes('pro') || lower.includes('max')) tags.push('1M')
+  return tags.length === 0 ? '' : `  [${tags.join(' · ')}]`
+}
+
+function effortLabel(id: string | undefined): string {
+  if (id === 'off') return '关闭思考（更快）'
+  if (id === 'high') return '思考 High'
+  if (id === 'max') return '思考 Max'
+  if (id === undefined) return '提供方默认'
+  return `思考 ${id}`
+}
+
+async function renderEffortMenu(ctx: Context, io: TuiIo, menu: MenuState, model: string): Promise<void> {
+  const current = ctx.get('agentDefaultModel')?.currentSelection()
+  const info = await ctx.get('llm')?.resolveModelInfo(menu.provider, model).catch(() => undefined)
+  const efforts = info?.reasoning?.efforts ?? []
+  menu.stage = 'effort'
+  menu.models = [model]
+  menu.efforts = efforts.length === 0
+    ? [{ label: '提供方默认（此模型无思考档）' }]
+    : [
+      { label: '提供方默认' },
+      ...efforts.map(effort => ({ id: String(effort.id), label: effortLabel(String(effort.id)) })),
+    ]
+  io.stdout.write(`\n选择 ${menu.provider}/${model} 的思考档（输入编号，0 返回模型）：\n`)
+  io.stdout.write(`  当前: ${current?.provider}/${current?.model}${current?.reasoningEffort ? ` · ${effortLabel(String(current.reasoningEffort))}` : ''}\n`)
+  menu.efforts.forEach((choice, index) => {
+    io.stdout.write(`  ${String(index + 1).padStart(2)}. ${choice.label}\n`)
   })
   io.stdout.write('   0. 返回\n')
 }
@@ -257,10 +396,29 @@ async function pickFromMenu(ctx: Context, io: TuiIo, menu: MenuState, input: str
       io.stdout.write(`(没有这个模型: ${trimmed})\n`)
       return 'continue'
     }
-    const next = { provider: menu.provider, model }
+    await renderEffortMenu(ctx, io, menu, model)
+    return 'continue'
+  }
+  if (menu.stage === 'effort') {
+    if (trimmed === '' || trimmed === '0') {
+      renderModelMenuForProvider(ctx, io, menu, menu.provider)
+      return 'continue'
+    }
+    const index = Number(trimmed) - 1
+    const choice = menu.efforts[index]
+    const model = menu.models[0]
+    if (!choice || !model) {
+      io.stdout.write(`(没有这个思考档: ${trimmed})\n`)
+      return 'continue'
+    }
+    const next = {
+      provider: menu.provider,
+      model,
+      ...choice.id === undefined ? {} : { reasoningEffort: ReasoningEffortId(choice.id) },
+    }
     menu.stage = 'off'
     await ctx.get('agentDefaultModel')?.saveSelection(next)
-    io.stdout.write(`(已设为 ${next.provider}/${next.model} — 正在开新会话生效)\n`)
+    io.stdout.write(`(已设为 ${next.provider}/${next.model} · ${choice.label} — 正在开新会话生效)\n`)
     return 'new'
   }
   return 'continue'
@@ -384,6 +542,92 @@ function renderArmorMenu(io: TuiIo, menu: MenuState): void {
   io.stdout.write('   0. 取消\n')
 }
 
+async function renderPresetMenu(ctx: Context, io: TuiIo, menu: MenuState): Promise<void> {
+  const roster = ctx.get('agentPresets')
+  if (roster === undefined) {
+    io.stdout.write('(当前没有 Agent 预设服务。桌面端设置 → Agent 预设 仍可改默认值。)\n')
+    menu.stage = 'off'
+    return
+  }
+  const list = (await roster.list()).filter(row => row.broken === undefined)
+  menu.presetIds = list.map(row => row.id)
+  menu.stage = 'preset'
+  const current = roster.defaultId
+  io.stdout.write('\n选择 Agent 预设（与桌面端同一项，新会话生效）：\n')
+  list.forEach((row, index) => {
+    const mark = row.id === current ? ' *' : ''
+    io.stdout.write(`  ${index + 1}. ${row.name ?? agentPresetLabel(row.id)} (${row.id})${mark}\n`)
+    if (row.description) io.stdout.write(`     ${row.description}\n`)
+  })
+  io.stdout.write('   0. 取消\n')
+}
+
+async function pickPreset(ctx: Context, menu: MenuState, input: string, io: TuiIo): Promise<'continue'> {
+  const trimmed = input.trim()
+  if (trimmed === '' || trimmed === '0') {
+    menu.stage = 'off'
+    io.stdout.write('(已取消)\n')
+    return 'continue'
+  }
+  const id = menu.presetIds[Number(trimmed) - 1]
+  if (id === undefined) {
+    io.stdout.write(`(没有这个预设: ${trimmed})\n`)
+    return 'continue'
+  }
+  try {
+    await ctx.get('settings')?.update(AGENT_PRESET_NS, { default: id })
+  } catch (error) {
+    io.stderr.write(`dsh: 未能写入预设: ${error instanceof Error ? error.message : String(error)}\n`)
+    menu.stage = 'off'
+    return 'continue'
+  }
+  menu.stage = 'off'
+  io.stdout.write(`(已切到 ${agentPresetLabel(id)}，与桌面端共用。输入 4 开新会话后生效)\n`)
+  return 'continue'
+}
+
+function renderPermissionMenu(ctx: Context, io: TuiIo, menu: MenuState): void {
+  const service = ctx.get('permissionPresets')
+  const names = service === undefined
+    ? ['read-only', 'workspace-write', 'danger-full-access']
+    : [...service.names]
+  menu.permissionIds = names
+  menu.stage = 'permission'
+  const current = service?.defaultPreset ?? 'danger-full-access'
+  io.stdout.write('\n选择权限（与桌面端「通用设置 → 权限」同一项，新会话生效）：\n')
+  names.forEach((name, index) => {
+    const mark = name === current ? ' *' : ''
+    const option = service?.optionOf(name)
+    io.stdout.write(`  ${index + 1}. ${option?.name ?? permissionLabel(name)} (${name})${mark}\n`)
+    if (option?.description) io.stdout.write(`     ${option.description}\n`)
+  })
+  io.stdout.write('   0. 取消\n')
+}
+
+async function pickPermission(ctx: Context, menu: MenuState, input: string, io: TuiIo): Promise<'continue'> {
+  const trimmed = input.trim()
+  if (trimmed === '' || trimmed === '0') {
+    menu.stage = 'off'
+    io.stdout.write('(已取消)\n')
+    return 'continue'
+  }
+  const id = menu.permissionIds[Number(trimmed) - 1]
+  if (id === undefined) {
+    io.stdout.write(`(没有这个权限: ${trimmed})\n`)
+    return 'continue'
+  }
+  try {
+    await ctx.get('settings')?.update(PERMISSION_NS, { defaultPreset: id })
+  } catch (error) {
+    io.stderr.write(`dsh: 未能写入权限: ${error instanceof Error ? error.message : String(error)}\n`)
+    menu.stage = 'off'
+    return 'continue'
+  }
+  menu.stage = 'off'
+  io.stdout.write(`(已切到 ${permissionLabel(id)}，与桌面端共用。输入 4 开新会话后生效)\n`)
+  return 'continue'
+}
+
 function pickArmorMode(menu: MenuState, input: string, sessionId: string, model: string, io: TuiIo): 'new' | 'continue' {
   const trimmed = input.trim()
   if (trimmed === '' || trimmed === '0') {
@@ -468,6 +712,54 @@ function installSkillFromPath(src: string, io: TuiIo): void {
     : `已拷到 ${dest}，但没看到 SKILL.md。技能目录里需要有 SKILL.md。\n`)
 }
 
+function formatTokens(n: number): string {
+  if (n < 1_000) return String(n)
+  if (n < 1_000_000) {
+    const scaled = n / 1_000
+    return `${scaled >= 100 ? Math.round(scaled) : Math.round(scaled * 10) / 10}K`
+  }
+  const scaled = n / 1_000_000
+  return `${scaled >= 100 ? Math.round(scaled) : Math.round(scaled * 10) / 10}M`
+}
+
+function occupancyFromPressure(
+  pressure: ContextPressureProjection | undefined,
+): { percent: number; used: number; window: number } | undefined {
+  const used = pressure?.projectedTokens ?? pressure?.pressureTokens
+  if (used === undefined || pressure?.contextWindow === undefined) return undefined
+  return {
+    percent: Math.min(100, Math.round(used / pressure.contextWindow * 100)),
+    used,
+    window: pressure.contextWindow,
+  }
+}
+
+function formatContextBar(ctx: Context, session: Session): string {
+  const pressure = ctx.get('sessionProjections')?.snapshot(session).values.contextPressure
+  const occupancy = occupancyFromPressure(pressure)
+  if (occupancy === undefined) return '上下文: 等待模型上报容量'
+  return `上下文: ${formatTokens(occupancy.used)} / ${formatTokens(occupancy.window)} · ${occupancy.percent}%`
+}
+
+function manualCompactionMessage(error: ManualCompactionError): string {
+  switch (error.code) {
+    case 'busy':
+      return '压缩不可用：已有压缩在跑，或智能体不空闲。'
+    case 'cancelled':
+      return '压缩已取消。'
+    case 'changed':
+      return '要压缩的历史在提交前变了，会话未改。'
+    case 'summary':
+      return '没能生成有用的摘要，会话未改。'
+    case 'commit':
+      return '压缩没有干净结束，先检查当前会话再重试。'
+    case 'persistence':
+      return '压缩完成，但会话没能保存。'
+    default:
+      return error.message
+  }
+}
+
 function formatGoalBar(goal: { phase: string; objective: string; roundsStarted: number; maxGoalRounds: number } | undefined): string | undefined {
   if (goal === undefined) return undefined
   const phase = goal.phase === 'active'
@@ -478,6 +770,47 @@ function formatGoalBar(goal: { phase: string; objective: string; roundsStarted: 
         ? '受阻的目标'
         : '已完成的目标'
   return `${phase} · 第 ${goal.roundsStarted}/${goal.maxGoalRounds} 轮\n${clip(goal.objective, 100)}`
+}
+
+function blocksText(content: ReadonlyArray<{ type: string; text?: string }>): string {
+  return content
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('')
+}
+
+function eventText(event: SessionEvent): string {
+  if (event.type === 'user/message') return blocksText(event.data.content)
+  if (event.type === 'assistant/message') return blocksText(event.data.message.content)
+  return ''
+}
+
+function printTrajectory(session: Session, io: TuiIo): void {
+  const events = session.events
+  const turns = events.filter(event => event.type === 'turn/start').length
+  const tools = events.filter(event => event.type === 'tool/call').length
+  io.stdout.write(`轨迹  ${turns} 轮  ${tools} 次工具  ${events.length} 条事件\n`)
+  let printed = 0
+  for (const event of events) {
+    if (event.type === 'user/message') {
+      io.stdout.write(`USER       ${clip(eventText(event), 120)}\n`)
+      printed += 1
+    } else if (event.type === 'tool/call') {
+      io.stdout.write(`TOOL       ${event.data.name}  ${prettyArgs(event.data.arguments)}\n`)
+      printed += 1
+    } else if (event.type === 'tool/result') {
+      const fail = event.data.error?.code
+      io.stdout.write(fail ? `TOOL-ERR    ${fail}\n` : 'TOOL-OK\n')
+      printed += 1
+    } else if (event.type === 'assistant/message') {
+      const text = eventText(event)
+      if (text.trim() !== '') {
+        io.stdout.write(`ASSISTANT  ${clip(text, 160)}\n`)
+        printed += 1
+      }
+    }
+  }
+  if (printed === 0) io.stdout.write('还没有记录。先说一句话再打开轨迹。\n')
 }
 
 function clip(text: string, max = 240): string {
@@ -588,15 +921,74 @@ function summarizeTurn(events: readonly SessionEvent[], firstSeq: number): TurnS
 /*  REPL core (one session life)                                              */
 /* -------------------------------------------------------------------------- */
 
+const IMAGE_MEDIA: Record<string, 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+
+function extractPathTokens(line: string): string[] {
+  const tokens: string[] = []
+  const quoted = /(?:"([^"]+)"|'([^']+)')/g
+  let match: RegExpExecArray | null
+  while ((match = quoted.exec(line)) !== null) tokens.push(match[1] ?? match[2] ?? '')
+  for (const raw of line.split(/\s+/)) {
+    const token = raw.replace(/^['"]|['"]$/g, '')
+    if (token.startsWith('/') || token.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(token)) tokens.push(token)
+  }
+  return [...new Set(tokens.filter(Boolean))]
+}
+
+function resolveDroppedPath(token: string, cwd: string): string | undefined {
+  const expanded = token.startsWith('~/') ? join(homedir(), token.slice(2)) : token
+  const candidates = [expanded, isAbsolute(expanded) ? expanded : resolve(cwd, expanded)]
+  for (const candidate of candidates) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
+  }
+  return undefined
+}
+
+async function composeUserContent(ctx: Context, line: string, cwd: string, io: TuiIo): Promise<ContentBlock[]> {
+  const blocks: ContentBlock[] = []
+  const notes: string[] = []
+  const attachments = ctx.get('attachments')
+  for (const token of extractPathTokens(line)) {
+    const path = resolveDroppedPath(token, cwd)
+    if (path === undefined) continue
+    const ext = extname(path).toLowerCase()
+    const mediaType = IMAGE_MEDIA[ext]
+    if (mediaType !== undefined && attachments !== undefined) {
+      try {
+        const data = new Uint8Array(readFileSync(path))
+        const attachment = await attachments.saveImage({ data, mediaType, name: basename(path) })
+        blocks.push({ type: 'image', attachment })
+        io.stdout.write(`(已附加图片 ${basename(path)} ${attachment.width}×${attachment.height})\n`)
+        continue
+      } catch (error) {
+        io.stderr.write(`dsh: 图片 ${basename(path)} 未附加: ${error instanceof Error ? error.message : String(error)}\n`)
+      }
+    }
+    notes.push(path)
+  }
+  const text = notes.length === 0
+    ? line
+    : `${line}\n\n附件路径:\n${notes.map(path => `- ${path}`).join('\n')}`
+  if (text.trim() !== '' || blocks.length === 0) blocks.unshift({ type: 'text', text })
+  return blocks
+}
+
 async function runTurn(
   agent: { followup(message: any): void; whenIdle(): Promise<void>; session: Session },
   sessions: { flush(session: Session): Promise<boolean> },
   line: string,
   cancel?: () => void,
+  content?: ContentBlock[],
 ): Promise<TurnSummary> {
   const firstSeq = agent.session.seq
   agent.followup(createUserMessage({
-    content: [{ type: 'text', text: line }],
+    content: content ?? [{ type: 'text', text: line }],
     source: { kind: 'user' },
   }))
   const idle = agent.whenIdle()
@@ -648,13 +1040,16 @@ async function runSession(ctx: Context, config: Config, io: TuiIo): Promise<Repl
     io.stdout.write(`(model ${provider}/${model})\n`)
   }
 
+  const presets = ctx.get('agentPresets')
+  const presetId = presets?.defaultId
   const { agent } = await agents.create({
     sessionId,
-    meta: { cwd: process.cwd() },
+    meta: { cwd: process.cwd(), ...presetId === undefined ? {} : { agentPreset: presetId } },
     agentOptions: effective ? { provider: effective.provider, model: effective.model } : {},
-    setup: (agentCtx) => {
+    setup: async (agentCtx) => {
       const selected: ModelSelectionRef = { current: effective, assembled: undefined }
       installModelSelection(agentCtx, selected)
+      if (presets !== undefined) await presets.mount(agentCtx, presetId)
     },
   })
 
@@ -682,8 +1077,14 @@ async function runSession(ctx: Context, config: Config, io: TuiIo): Promise<Repl
     const bar = formatGoalBar(currentGoal())
     if (bar) io.stdout.write(`${bar}\n`)
   }
+  const printContextBar = (): void => {
+    io.stdout.write(`${formatContextBar(ctx, agent.session)}\n`)
+  }
+  let replClosed = false
   const prompt = () => {
+    if (replClosed) return
     printGoalBar()
+    printContextBar()
     if (isTty) rl.prompt()
     else io.stdout.write(promptText)
   }
@@ -697,12 +1098,16 @@ async function runSession(ctx: Context, config: Config, io: TuiIo): Promise<Repl
     const enabled = armor?.enabled ?? coldbrew?.defaultEnabled !== false
     const mode = armor?.mode || globalMode
     const armorLine = `破甲: ${enabled ? '已开' : '未开'} · ${armorModeLabel(mode)}（输入 8 切换，新会话生效）`
+    const presetLine = `Agent 预设: ${agentPresetLabel(ctx.get('agentPresets')?.defaultId ?? 'standard')}（输入 10 切换）`
+    const permissionLine = `权限: ${permissionLabel(ctx.get('permissionPresets')?.defaultPreset ?? 'danger-full-access')}（输入 11 切换）`
     io.stdout.write(`
 工作区: ${workspace}
 ${armorLine}
+${presetLine}
+${permissionLine}
 （就是你敲 dsh 时所在的目录；cd 到项目再开 CLI。输入「工作区」再看一次。）
 命令（数字、斜杠、或菜单上的中文名都可以）：
-  1  /model     模型 / 选择模型 / 选模型     （当前: ${current?.provider}/${current?.model}）
+  1  /model     模型 / 选择模型 / 选模型     （当前: ${current?.provider}/${current?.model}${current?.reasoningEffort ? ` · ${effortLabel(String(current.reasoningEffort))}` : ''}）
   2  /config    配置 / 设置
   3  /help      帮助 / 菜单
   4  /new       新会话 / 开新会话
@@ -710,8 +1115,14 @@ ${armorLine}
   6  /cwd       工作区
   7  /skills    技能
   8  /armor     工作模式 / 破甲
+  9  /trace     轨迹
+  10 /preset    Agent 预设
+  11 /permission 权限
+  12 /compact   压缩上下文
+  13 /memory   记忆
 直接打字回车就是对话。输入「帮助」或 3 再看本菜单。
 整句「冷咖啡」只演口令（MAX 已开），不换内核。要换内核用菜单 8，再开新会话。
+把图片/文件拖进终端，或把路径写在句子里，CLI 会当附件发出。
 `)
   }
 
@@ -727,8 +1138,9 @@ ${armorLine}
   // A command that arrived while a turn was in flight (`/quit`, `/new`) or a
   // stdin EOF: honored after the current turn settles, never mid-turn.
   let pending: ReplExitReason | undefined
+  let pendingQueue: string[] = []
   // Model menu state: while active, the next input line is a menu choice.
-  const menu: MenuState = { stage: 'off', providers: [], models: [], provider: '', reachable: new Map() }
+  const menu: MenuState = { stage: 'off', providers: [], models: [], provider: '', efforts: [], reachable: new Map(), presetIds: [], permissionIds: [] }
 
   const configSummary = (): string => {
     const current = ctx.get('agentDefaultModel')?.currentSelection()
@@ -745,6 +1157,11 @@ ${armorLine}
       '模型和密钥跟桌面端共用：设置 → 模型。CLI 输入 1 选接口商再选模型。',
       '插件也在桌面端装（设置 → 插件），CLI 共用同一套配置。',
       `工作模式: ${armorModeLabel(readGlobalArmorMode())}（菜单 8 切换，与桌面端共用）`,
+      `Agent 预设: ${agentPresetLabel(ctx.get('agentPresets')?.defaultId ?? 'standard')}（菜单 10）`,
+      `权限: ${permissionLabel(ctx.get('permissionPresets')?.defaultPreset ?? 'danger-full-access')}（菜单 11）`,
+      formatContextBar(ctx, agent.session),
+      '长对话默认自动压缩（约满窗口 80%）。输入 12 或 /compact 可手动压一次。',
+      '本地记忆: /memory list|search|add|forget（~/.dsh/tui-memory.json）',
       '手动改文件：~/.dsh/settings.yaml 、 ~/.dsh/.credentials.yaml',
       '',
     ].join('\n')
@@ -753,21 +1170,36 @@ ${armorLine}
   let done: (reason: ReplExitReason) => void = () => {}
   const finished = new Promise<ReplExitReason>((resolve) => { done = resolve })
 
-  // Ctrl+C while a turn is in flight cancels the turn (back to the prompt),
-  // not the process; an idle Ctrl+C exits 130 like any CLI interrupt.
-  // The launcher's own SIGINT handler would exit unconditionally, so the TUI
-  // owns the signal for the rest of this session's life: replace it here.
+  // Ctrl+C must be handled on the readline Interface. With no rl 'SIGINT'
+  // listener, Node closes the interface (ERR_USE_AFTER_CLOSE on the next
+  // prompt) and our close handler treats that as EOF / quit.
   process.removeAllListeners('SIGINT')
+  let idleInterruptAt = 0
   const onSigint = () => {
     if (busy) {
+      idleInterruptAt = 0
       agent.cancel({ kind: 'user' })
-      io.stdout.write('\n(已取消 — 再按一次 Ctrl+C 退出)\n')
+      io.stdout.write('\n(已停止本轮 — 可继续输入。再按两次 Ctrl+C 退出)\n')
+      prompt()
       return
     }
-    done('quit')
-    io.exit(130)
+    const now = Date.now()
+    if (now - idleInterruptAt < 2000) {
+      done('quit')
+      io.exit(130)
+      return
+    }
+    idleInterruptAt = now
+    try {
+      if (isTty && !replClosed) rl.write(null, { ctrl: true, name: 'u' })
+    } catch {
+      // Non-TTY readline has no key sequence writer.
+    }
+    io.stdout.write('\n(已清空输入。再按一次 Ctrl+C 退出，或继续打字)\n')
+    prompt()
   }
-  process.once('SIGINT', onSigint)
+  rl.on('SIGINT', onSigint)
+  process.on('SIGINT', onSigint)
 
   printCommandMenu()
   prompt()
@@ -783,6 +1215,11 @@ ${armorLine}
         6: '/cwd',
         7: '/skills',
         8: '/armor',
+        9: '/trace',
+        10: '/preset',
+        11: '/permission',
+        12: '/compact',
+        13: '/memory',
         模型: '/model',
         选择模型: '/model',
         选模型: '/model',
@@ -798,6 +1235,14 @@ ${armorLine}
         技能: '/skills',
         破甲: '/armor',
         工作模式: '/armor',
+        轨迹: '/trace',
+        时间线: '/trace',
+        预设: '/preset',
+        Agent预设: '/preset',
+        权限: '/permission',
+        压缩: '/compact',
+        压缩上下文: '/compact',
+        记忆: '/memory',
       }
       trimmed = shortcut[trimmed] ?? trimmed
     }
@@ -807,6 +1252,16 @@ ${armorLine}
       const next = pickArmorMode(menu, trimmed, armorId, model, io)
       if (next === 'new') { if (busy) { pending = 'new' } else done('new') }
       else prompt()
+      return
+    }
+    if (menu.stage === 'preset' && !trimmed.startsWith('/')) {
+      await pickPreset(ctx, menu, trimmed, io)
+      prompt()
+      return
+    }
+    if (menu.stage === 'permission' && !trimmed.startsWith('/')) {
+      await pickPermission(ctx, menu, trimmed, io)
+      prompt()
       return
     }
     if (menu.stage !== 'off' && !trimmed.startsWith('/')) {
@@ -834,6 +1289,17 @@ ${armorLine}
     if (trimmed === '/armor') {
       if (menu.stage !== 'off') { io.stdout.write('(菜单已经打开)\n'); prompt(); return }
       renderArmorMenu(io, menu)
+      return
+    }
+    if (trimmed === '/preset') {
+      if (menu.stage !== 'off') { io.stdout.write('(菜单已经打开)\n'); prompt(); return }
+      await renderPresetMenu(ctx, io, menu)
+      prompt()
+      return
+    }
+    if (trimmed === '/permission') {
+      if (menu.stage !== 'off') { io.stdout.write('(菜单已经打开)\n'); prompt(); return }
+      renderPermissionMenu(ctx, io, menu)
       return
     }
     if (trimmed === '/config') {
@@ -870,6 +1336,15 @@ ${armorLine}
       }
       prompt(); return
     }
+    if (trimmed === '/memory' || trimmed === '/memory list' || trimmed === '/memory forget' || trimmed.startsWith('/memory ')) {
+      const memStore = loadMemory()
+      if (trimmed === '/memory') { memoryList(memStore, io); prompt(); return }
+      if (trimmed === '/memory list') { memoryList(memStore, io); prompt(); return }
+      if (trimmed.startsWith('/memory search ')) { memorySearch(memStore, trimmed.replace('/memory search', ''), io); prompt(); return }
+      if (trimmed.startsWith('/memory add ')) { memoryAdd(memStore, trimmed, io); prompt(); return }
+      if (/^\/memory\s+(?:forget|delete)\s/.test(trimmed)) { memoryForget(memStore, trimmed, io); prompt(); return }
+      io.stdout.write('(用法: /memory search|add|list|forget <参数>)\n'); prompt(); return
+    }
     if (pending !== undefined) return
 
     if (trimmed === '/help') {
@@ -886,14 +1361,50 @@ ${armorLine}
     }
 
     if (busy) {
-      io.stdout.write('(还在处理，等提示符再输入)\n')
+      io.stdout.write(`(已排入队列，当前 turn 结束后处理。队列 ${pendingQueue.length + 1} 条。Ctrl+C 取消)\n`)
+      pendingQueue.push(trimmed)
+      return
+    }
+
+    if (trimmed === '/trace') {
+      printTrajectory(agent.session, io)
+      prompt()
+      return
+    }
+    if (trimmed === '/compact') {
+      const compaction = ctx.get('compaction')
+      if (compaction === undefined) {
+        io.stdout.write('当前配置没有挂载压缩服务。\n')
+        prompt()
+        return
+      }
+      busy = true
+      io.stdout.write('(正在压缩上下文…)\n')
+      try {
+        const result = await compaction.compactNow(agent, new AbortController().signal)
+        if (result === null) io.stdout.write('还没有可压缩的历史。\n')
+        else {
+          io.stdout.write(`已压缩 ${result.shadowedSeqs.length} 条历史（约 ${formatTokens(result.shadowedTokenCount)} tokens）。\n`)
+        }
+      } catch (error) {
+        if (error instanceof ManualCompactionError) {
+          io.stdout.write(`${manualCompactionMessage(error)}\n`)
+        } else {
+          io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`)
+        }
+      } finally {
+        busy = false
+      }
+      if (pending !== undefined) { done(pending); return }
+      prompt()
       return
     }
 
     busy = true
     io.stdout.write('(正在处理… Ctrl+C 取消)\n')
     try {
-      const outcome = await runTurn(agent, sessions, trimmed, () => { agent.cancel({ kind: 'user' }) })
+      const content = await composeUserContent(ctx, trimmed, workspace, io)
+      const outcome = await runTurn(agent, sessions, trimmed, () => { agent.cancel({ kind: 'user' }) }, content)
       if (outcome.text !== '') io.stdout.write(outcome.text + '\n')
       if (outcome.reason?.kind === 'error') {
         io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
@@ -929,16 +1440,34 @@ ${armorLine}
     } catch (error) {
       io.stderr.write(`dsh: turn failed: ${error instanceof Error ? error.message : String(error)}\n`)
     } finally {
+      // Stay busy until queued follow-ups drain, otherwise stdin EOF
+      // (readline 'close') treats the idle gap as quit and drops the queue.
+      while (pending === undefined && pendingQueue.length > 0) {
+        const nextLine = pendingQueue.shift()
+        if (!nextLine) continue
+        io.stdout.write(`(队列 turn: ${clip(nextLine, 60)})\n`)
+        try {
+          io.stdout.write('(正在处理… Ctrl+C 取消)\n')
+          const content = await composeUserContent(ctx, nextLine, workspace, io)
+          const outcome = await runTurn(agent, sessions, nextLine, () => { agent.cancel({ kind: 'user' }) }, content)
+          if (outcome.text !== '') io.stdout.write(outcome.text + '\n')
+          if (outcome.reason?.kind === 'error') io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
+        } catch (error) {
+          io.stderr.write(`dsh: queued turn failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        }
+      }
       busy = false
       if (pending !== undefined) { done(pending); return }
+      if (replClosed) { done('eof'); return }
       prompt()
     }
   })
 
   rl.on('close', () => {
-    // readline closes on stdin EOF (or explicit close). If a turn is in
-    // flight, wait for it; otherwise resolve now.
-    if (!busy) done(pending ?? 'eof')
+    replClosed = true
+    // stdin EOF still ends the REPL. SIGINT is handled above and must not
+    // treat a closed interface as quit. Leave a busy/queued drain to finish.
+    if (!busy && pendingQueue.length === 0 && idleInterruptAt === 0) done(pending ?? 'eof')
   })
 
   try {

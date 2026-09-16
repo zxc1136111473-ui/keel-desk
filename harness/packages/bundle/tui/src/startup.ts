@@ -69,6 +69,11 @@ function tuiCommand(): Command {
   6 /cwd       工作区
   7 /skills    技能
   8 /armor     工作模式 / 破甲
+  9 /trace     轨迹
+  10 /preset    Agent 预设
+  11 /permission 权限
+  12 /compact   压缩上下文
+  13 /memory    记忆
 示例：
   dsh                                        直接进入交互菜单
   dsh tui                                    同上

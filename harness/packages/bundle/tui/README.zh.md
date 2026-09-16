@@ -21,6 +21,7 @@ dsh --profile tui --session my-session         # 指定稳定的会话 id
 | `/quit` `/exit` | 退出进程（exit code 0）。 |
 | `/new` | 开启新会话（新 UUID，先前上下文丢失）。 |
 | `/help` | 显示可用命令。 |
+| `12` `/compact` | 手动压缩较早历史。`dsh-base` 仍会在大约窗口 80% 时自动压缩。 |
 
 ## 挂载桌面工具（pg_*、ColdBrew、Reverify）
 
@@ -33,6 +34,8 @@ base bundle 提供标准 harness 工具集（bash、fs、web、subagent、goal�
 ```
 
 desktop-manager 插件使用 `ctx.get('webServer')`，仅在存在 HTTP 层时注册管理路由；在没有 Host 的 CLI profile 中可以正常加载，并仍注册其工具和 system-prompt section。
+
+每次提示符前打印 `上下文: 已用 / 窗口 · 百分比`，数据来自 `contextPressure` 投影；模型还没上报容量时显示 `上下文: 等待模型上报容量`。`dsh-base` 已挂载 `token-meter`、`compaction-basic` 和 `command-compact`。
 
 ## 已知限制与待办
 

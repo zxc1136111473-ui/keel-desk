@@ -27,8 +27,9 @@ dsh --profile tui --session my-session         # pin a stable session id
 | `3` `/help` | Reprint the command menu. |
 | `4` `/new` | Start a fresh session (new UUID, prior context lost). |
 | `5` `/quit` `/exit` | Exit the process with code 0. |
+| `12` `/compact` | Manually compact older history. Automatic compaction still runs from `dsh-base` at about 80% of the model window. |
 
-The REPL uses cooked line input (`readline` `terminal: false`) so kernel/IME echo is not doubled on macOS. Command menus are printed in Chinese.
+The REPL uses cooked line input (`readline` `terminal: false`) so kernel/IME echo is not doubled on macOS. Command menus are printed in Chinese. Each prompt prints `上下文: used / window · percent` from the `contextPressure` projection once a model reports capacity; before that it prints `上下文: 等待模型上报容量`. `dsh-base` already mounts `token-meter`, `compaction-basic`, and `command-compact`.
 
 ## Mounting desktop tools (pg_*, ColdBrew, Reverify)
 

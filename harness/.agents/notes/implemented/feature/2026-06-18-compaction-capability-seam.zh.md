@@ -123,7 +123,7 @@ compaction/end      → log-only. Releases the lock (carries `error` on a recove
 - **`SessionEventMap`** 通过可合并扩展的声明合并获得 `compaction/start` / `compaction/summary` / `compaction/end`；`SurfaceEventType` **未被**触及。这些是会话事件，不是 cordis `Events`，因此事件分类门禁无需新增条目。
 - **`dsh-compaction`** 拥有 `COMPACT_CHECKPOINT_SOURCE`、`isCompactCheckpointSource(source)`、`toolPairingBalancedBefore(session, seq)` 与 `toolPairingBalancedAfter(session, seq)`。该标记用于跨后端实现识别替换摘要。带缓存的 surface 边缘检查会防止 `compactRegion` 和 `compactIfNeeded` 拆分工具调用/结果对，按 seq 校验当前成员关系，从每个切割点的一条平衡序列回答两侧边缘，并拒绝陈旧或缺失的 seq 与孤立结果。
 - **`dsh-session`** 通过唯一的 surface 管理器校验位置替换、引用的来源事件是否覆盖完整，以及仅内容的单节点 `tool/result` 重写。其不变式配套插件将新追加的工具结果视为执行，要求存在已打开的步骤与待处理调用，而压缩配套组件负责维护数字轮次 owner 与独立 `null` owner 事件对之间的关系。
-- **接线**：`examples/tui-agent/cordis.yml` 依次加载零配置的 `dsh-token-meter`、`dsh-compaction-tool-result-pruner`、`dsh-compaction-basic`，然后加载 `dsh-command-compact`；服务级默认值使组合无需重复数值策略即可使用。
+- **接线**：`dsh-base` 依次加载零配置的 `dsh-token-meter`、`dsh-compaction-basic`，然后加载 `dsh-command-compact`；`dsh-tui` 叠在该 base 上，每次 REPL 提示符打印 `contextPressure` 占用，并把 `/compact` 映射到 `ctx.compaction.compactNow()`。服务级默认值使组合无需重复数值策略即可使用。
 
 ## 测试
 

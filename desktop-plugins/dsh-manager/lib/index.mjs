@@ -36,7 +36,7 @@ import {
 import { snapshotHarnessLlms, inspectHarnessLlms, pickHarnessLlm, applyLlmToEnvText, syncGraphqlProviders } from './pentagi-providers.mjs'
 
 export const name = 'dsh-desktop-manager'
-export const inject = ['loader', 'systemPrompt', 'tools']
+export const inject = ['webServer', 'loader', 'systemPrompt', 'tools']
 export { ARMOR_MODES, DEFAULT_ARMOR_MODE, normalizeArmorMode }
 
 const repositoryRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))

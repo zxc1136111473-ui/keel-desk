@@ -471,19 +471,23 @@ async function probePentagi() {
 }
 
 export function apply(ctx) {
-  // Harness 起来后按设置决定是否后台拉 compose。stopOnExit=true 时进程退出会 down。
-  const pentagiCfg = (() => {
-    try { return loadSettingsSync()?.coldbrew?.pentagi ?? {} } catch { return {} }
-  })()
-  if (pentagiCfg.autostart !== false) {
-    setTimeout(() => {
-      startPentagiRuntime((line) => {
-        taskLogs.push(line)
-        if (taskLogs.length > 400) taskLogs = taskLogs.slice(-300)
-      }).catch((error) => {
-        taskLogs.push(`pentagi autostart: ${error?.message ?? error}`)
-      })
-    }, 1500)
+  // CLI 模式（无 webServer）不自动拉起 PentAGI compose：终端里拉一堆容器
+  // 既拖慢启动也没人看状态。GUI 里保留 autostart 行为。
+  const hasWeb = ctx.get('webServer') !== undefined
+  if (hasWeb) {
+    const pentagiCfg = (() => {
+      try { return loadSettingsSync()?.coldbrew?.pentagi ?? {} } catch { return {} }
+    })()
+    if (pentagiCfg.autostart !== false) {
+      setTimeout(() => {
+        startPentagiRuntime((line) => {
+          taskLogs.push(line)
+          if (taskLogs.length > 400) taskLogs = taskLogs.slice(-300)
+        }).catch((error) => {
+          taskLogs.push(`pentagi autostart: ${error?.message ?? error}`)
+        })
+      }, 1500)
+    }
   }
   const shutdown = () => {
     if (!pentagiStopOnExit()) return

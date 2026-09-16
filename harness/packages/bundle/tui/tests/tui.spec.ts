@@ -131,6 +131,7 @@ describe('tui runner', () => {
     expect(result.out).toContain('工作区:')
     expect(result.out).toContain('破甲:')
     expect(result.out).toContain('/skills')
+    expect(result.out).toContain('/armor')
     expect(result.out).toContain('帮助 / 菜单')
     await test.ctx.fiber.dispose()
   })
@@ -224,28 +225,42 @@ describe('tui runner', () => {
     await test.ctx.fiber.dispose()
   })
 
-  it('whole-line 冷咖啡 passphrase acks without a model turn and persists the session', async () => {
+  it('menu 8 switches armor mode like the desktop chips and starts a new session', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-tui-armor-'))
     const previous = process.env.DSH_HOME
     process.env.DSH_HOME = home
     try {
       const test = await bench({
         afterPrompt() {
-          throw new Error('passphrase must not start a model turn')
+          throw new Error('armor menu must not start a model turn')
         },
-      }, ['冷咖啡\n', '/quit\n'], { sessionId: 'session-cli-armor' })
+      }, ['8\n', '3\n', '/quit\n'], { sessionId: 'session-cli-armor' })
       const result = await test.run()
       expect(result.code).toBe(0)
-      expect(result.out).toContain('MAX 已开，把对象发来')
+      expect(result.out).toContain('选择工作模式')
+      expect(result.out).toContain('PentAGI 1.0.0')
+      expect(result.out).toContain('已切到 PentAGI 1.0.0')
       expect(result.err).toBe('')
-      const disk = JSON.parse(readFileSync(join(home, 'coldbrew-sessions.json'), 'utf8')) as { 'session-cli-armor': { mode: string; enabled: boolean } }
-      expect(disk['session-cli-armor'].mode).toBe('coldbrew')
-      expect(disk['session-cli-armor'].enabled).toBe(true)
+      const settings = JSON.parse(readFileSync(join(home, 'desktop-settings.json'), 'utf8')) as { coldbrew: { armorMode: string } }
+      expect(settings.coldbrew.armorMode).toBe('pentagi')
       await test.ctx.fiber.dispose()
     } finally {
       if (previous === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = previous
       rmSync(home, { recursive: true, force: true })
     }
+  })
+
+  it('whole-line 冷咖啡 plays MAX without a model turn or kernel switch', async () => {
+    const test = await bench({
+      afterPrompt() {
+        throw new Error('passphrase play must not start a model turn')
+      },
+    }, ['冷咖啡\n', '/quit\n'])
+    const result = await test.run()
+    expect(result.code).toBe(0)
+    expect(result.out).toContain('MAX 已开，把对象发来')
+    expect(result.err).toBe('')
+    await test.ctx.fiber.dispose()
   })
 })

@@ -19,6 +19,7 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-skill'
+import type {} from '@deepseek-ai/dsh-goal'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -99,7 +100,7 @@ interface ProviderCatalog {
 
 /** REPL menu state owned by one session. */
 interface MenuState {
-  stage: 'off' | 'provider' | 'model' | 'skill'
+  stage: 'off' | 'provider' | 'model' | 'skill' | 'armor'
   providers: string[]
   models: string[]
   provider: string
@@ -298,21 +299,57 @@ async function probeProvider(baseUrl: string | undefined): Promise<boolean> {
   }
 }
 
-const ARMOR_PASSPHRASES: Array<{ re: RegExp; mode: 'coldbrew' | 'reverify' | 'pentagi'; ack: string }> = [
-  { re: /^(冷咖啡|cold\s*coffee|BREAK\/\/OPEN|\[\[ENI:PROFILE=MAX\]\]|\[\[CB:MAX\]\])$/i, mode: 'coldbrew', ack: 'MAX 已开，把对象发来' },
-  { re: /^(reverify|\[\[RV:VERIFY\]\])$/i, mode: 'reverify', ack: 'Reverify 已开，把样本路径发来' },
-  { re: /^(pentagi|\[\[PG:OPEN\]\])$/i, mode: 'pentagi', ack: 'PentAGI 已开，把目标发来' },
+type ArmorMode = 'coldbrew' | 'reverify' | 'pentagi'
+
+const ARMOR_CHOICES: Array<{ mode: ArmorMode; label: string }> = [
+  { mode: 'coldbrew', label: '冷咖啡 2.1.0' },
+  { mode: 'reverify', label: 'Reverify 0.9.0' },
+  { mode: 'pentagi', label: 'PentAGI 1.0.0' },
 ]
 
-/**
- * Whole-line armor passphrases switch the session kernel without a model turn.
- * @param sessionId - current TUI session id
- * @param line - trimmed user input
- * @param model - current model id for profile matching
- * @returns ack text when the line is a passphrase; otherwise null
- */
-function persistArmorSession(sessionId: string, mode: string, model: string): void {
-  const home = String(process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
+/** Whole-line phrases the desktop GUI also treats as optional wake words. Played locally; they do not switch the kernel. */
+const ARMOR_PLAY: Array<{ re: RegExp; ack: string }> = [
+  { re: /^(冷咖啡|cold\s*coffee|BREAK\/\/OPEN|\[\[ENI:PROFILE=MAX\]\]|\[\[CB:MAX\]\])$/i, ack: 'MAX 已开，把对象发来' },
+  { re: /^(reverify|\[\[RV:VERIFY\]\])$/i, ack: 'Reverify 已开，把样本路径发来' },
+  { re: /^(pentagi|\[\[PG:OPEN\]\])$/i, ack: 'PentAGI 已开，把目标发来' },
+]
+
+function playArmorPhrase(line: string): string | null {
+  return ARMOR_PLAY.find(row => row.re.test(line))?.ack ?? null
+}
+
+function dshHome(): string {
+  return String(process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
+}
+
+function readDesktopSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(join(dshHome(), 'desktop-settings.json'), 'utf8')) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function readGlobalArmorMode(): ArmorMode {
+  const settings = readDesktopSettings()
+  const coldbrew = settings.coldbrew as { armorMode?: string } | undefined
+  const mode = coldbrew?.armorMode
+  if (mode === 'reverify' || mode === 'pentagi' || mode === 'coldbrew') return mode
+  return 'coldbrew'
+}
+
+function persistGlobalArmorMode(mode: ArmorMode): void {
+  const home = dshHome()
+  const dest = join(home, 'desktop-settings.json')
+  const settings = readDesktopSettings()
+  const coldbrew = (settings.coldbrew ?? {}) as Record<string, unknown>
+  settings.coldbrew = { ...coldbrew, armorMode: mode, defaultEnabled: coldbrew.defaultEnabled !== false }
+  mkdirSync(home, { recursive: true })
+  writeFileSync(dest, JSON.stringify(settings, null, 2))
+}
+
+function persistArmorSession(sessionId: string, mode: ArmorMode, model: string): void {
+  const home = dshHome()
   const dest = join(home, 'coldbrew-sessions.json')
   let sessions: Record<string, { enabled: boolean; model: string; mode: string }> = {}
   try {
@@ -320,22 +357,51 @@ function persistArmorSession(sessionId: string, mode: string, model: string): vo
   } catch {
     sessions = {}
   }
-  // desktop-manager resolveColdbrewState keys on agent.id — write the same id.
   sessions[sessionId] = { enabled: true, model, mode }
   mkdirSync(home, { recursive: true })
   writeFileSync(dest, JSON.stringify(sessions, null, 2))
 }
 
 function readArmorSession(sessionId: string): { enabled: boolean; mode: string } | undefined {
-  const home = String(process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
   try {
-    const sessions = JSON.parse(readFileSync(join(home, 'coldbrew-sessions.json'), 'utf8')) as Record<string, { enabled?: boolean; mode?: string }>
+    const sessions = JSON.parse(readFileSync(join(dshHome(), 'coldbrew-sessions.json'), 'utf8')) as Record<string, { enabled?: boolean; mode?: string }>
     const row = sessions[sessionId]
     if (!row) return undefined
     return { enabled: row.enabled === true, mode: String(row.mode ?? '') }
   } catch {
     return undefined
   }
+}
+
+function renderArmorMenu(io: TuiIo, menu: MenuState): void {
+  const current = readGlobalArmorMode()
+  menu.stage = 'armor'
+  io.stdout.write('\n选择工作模式（与桌面端「破甲管理」同一项，一次只能开一个；新会话才生效）：\n')
+  ARMOR_CHOICES.forEach((choice, index) => {
+    const mark = choice.mode === current ? ' *' : ''
+    io.stdout.write(`  ${index + 1}. ${choice.label}${mark}\n`)
+  })
+  io.stdout.write('   0. 取消\n')
+}
+
+function pickArmorMode(menu: MenuState, input: string, sessionId: string, model: string, io: TuiIo): 'new' | 'continue' {
+  const trimmed = input.trim()
+  if (trimmed === '' || trimmed === '0') {
+    menu.stage = 'off'
+    io.stdout.write('(已取消)\n')
+    return 'continue'
+  }
+  const index = Number(trimmed) - 1
+  const choice = ARMOR_CHOICES[index]
+  if (!choice) {
+    io.stdout.write(`(没有这个选项: ${trimmed})\n`)
+    return 'continue'
+  }
+  persistGlobalArmorMode(choice.mode)
+  persistArmorSession(sessionId, choice.mode, model)
+  menu.stage = 'off'
+  io.stdout.write(`(已切到 ${choice.label}，与桌面端共用。输入 4 开新会话后生效)\n`)
+  return 'continue'
 }
 
 function armorModeLabel(mode: string): string {
@@ -400,6 +466,18 @@ function installSkillFromPath(src: string, io: TuiIo): void {
   io.stdout.write(marker
     ? `已安装到 ${dest}。下一轮对话会加载。输入「技能」再看列表。\n`
     : `已拷到 ${dest}，但没看到 SKILL.md。技能目录里需要有 SKILL.md。\n`)
+}
+
+function formatGoalBar(goal: { phase: string; objective: string; roundsStarted: number; maxGoalRounds: number } | undefined): string | undefined {
+  if (goal === undefined) return undefined
+  const phase = goal.phase === 'active'
+    ? '进行中的目标'
+    : goal.phase === 'paused'
+      ? '已暂停的目标'
+      : goal.phase === 'blocked'
+        ? '受阻的目标'
+        : '已完成的目标'
+  return `${phase} · 第 ${goal.roundsStarted}/${goal.maxGoalRounds} 轮\n${clip(goal.objective, 100)}`
 }
 
 function clip(text: string, max = 240): string {
@@ -484,24 +562,6 @@ function printLiveEvent(io: TuiIo, event: SessionEvent, live: LiveLogState): voi
       ? `✓ 失败 ${fail}${preview ? `  ${clip(preview, 120)}` : ''}\n`
       : `✓ 完成${preview ? `  ${clip(preview, 120)}` : ''}\n`)
   }
-}
-
-/**
- * Whole-line armor passphrases switch the session kernel without a model turn.
- * @param sessionId - current TUI session id
- * @param line - trimmed user input
- * @param model - current model id for profile matching
- * @returns ack text when the line is a passphrase; otherwise null
- */
-function applyArmorPassphrase(sessionId: string, line: string, model: string): string | null {
-  const hit = ARMOR_PASSPHRASES.find(row => row.re.test(line))
-  if (hit === undefined) return null
-  try {
-    persistArmorSession(sessionId, hit.mode, model)
-  } catch {
-    // Disk write is best-effort; still ack so the line is not sent as a task.
-  }
-  return `${hit.ack}（本会话破甲=${armorModeLabel(hit.mode)}）`
 }
 
 function summarizeTurn(events: readonly SessionEvent[], firstSeq: number): TurnSummary {
@@ -617,7 +677,13 @@ async function runSession(ctx: Context, config: Config, io: TuiIo): Promise<Repl
     terminal: isTty,
     ...(isTty ? { prompt: promptText } : {}),
   })
+  const currentGoal = () => ctx.get('goals')?.get(agent)
+  const printGoalBar = (): void => {
+    const bar = formatGoalBar(currentGoal())
+    if (bar) io.stdout.write(`${bar}\n`)
+  }
   const prompt = () => {
+    printGoalBar()
     if (isTty) rl.prompt()
     else io.stdout.write(promptText)
   }
@@ -625,9 +691,12 @@ async function runSession(ctx: Context, config: Config, io: TuiIo): Promise<Repl
   const printCommandMenu = (): void => {
     const current = ctx.get('agentDefaultModel')?.currentSelection()
     const armor = readArmorSession(armorId)
-    const armorLine = armor?.enabled
-      ? `破甲: 已开 · ${armorModeLabel(armor.mode)}`
-      : '破甲: 未开（整句发「冷咖啡」开启）'
+    const globalMode = readGlobalArmorMode()
+    const settings = readDesktopSettings()
+    const coldbrew = settings.coldbrew as { defaultEnabled?: boolean } | undefined
+    const enabled = armor?.enabled ?? coldbrew?.defaultEnabled !== false
+    const mode = armor?.mode || globalMode
+    const armorLine = `破甲: ${enabled ? '已开' : '未开'} · ${armorModeLabel(mode)}（输入 8 切换，新会话生效）`
     io.stdout.write(`
 工作区: ${workspace}
 ${armorLine}
@@ -640,21 +709,17 @@ ${armorLine}
   5  /quit      退出
   6  /cwd       工作区
   7  /skills    技能
+  8  /armor     工作模式 / 破甲
 直接打字回车就是对话。输入「帮助」或 3 再看本菜单。
-整句发「冷咖啡」切破甲；「reverify」「pentagi」切另外两种内核。
+整句「冷咖啡」只演口令（MAX 已开），不换内核。要换内核用菜单 8，再开新会话。
 `)
   }
 
   if (config.initialTask && config.initialTask.trim() !== '') {
-    const passphraseAck = applyArmorPassphrase(armorId, config.initialTask.trim(), model)
-    if (passphraseAck !== null) {
-      io.stdout.write(passphraseAck + '\n')
-    } else {
-      const outcome = await runTurn(agent, sessions, config.initialTask)
-      if (outcome.text !== '') io.stdout.write(outcome.text + '\n')
-      if (outcome.reason?.kind === 'error') {
-        io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
-      }
+    const outcome = await runTurn(agent, sessions, config.initialTask)
+    if (outcome.text !== '') io.stdout.write(outcome.text + '\n')
+    if (outcome.reason?.kind === 'error') {
+      io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
     }
   }
 
@@ -679,6 +744,7 @@ ${armorLine}
       `可选模型: ${choices.length} 个`,
       '模型和密钥跟桌面端共用：设置 → 模型。CLI 输入 1 选接口商再选模型。',
       '插件也在桌面端装（设置 → 插件），CLI 共用同一套配置。',
+      `工作模式: ${armorModeLabel(readGlobalArmorMode())}（菜单 8 切换，与桌面端共用）`,
       '手动改文件：~/.dsh/settings.yaml 、 ~/.dsh/.credentials.yaml',
       '',
     ].join('\n')
@@ -716,6 +782,7 @@ ${armorLine}
         5: '/quit',
         6: '/cwd',
         7: '/skills',
+        8: '/armor',
         模型: '/model',
         选择模型: '/model',
         选模型: '/model',
@@ -729,11 +796,19 @@ ${armorLine}
         退出: '/quit',
         工作区: '/cwd',
         技能: '/skills',
+        破甲: '/armor',
+        工作模式: '/armor',
       }
       trimmed = shortcut[trimmed] ?? trimmed
     }
 
-    // A model menu is armed: the next non-command line is a choice number.
+    // A model or armor menu is armed: the next non-command line is a choice number.
+    if (menu.stage === 'armor' && !trimmed.startsWith('/')) {
+      const next = pickArmorMode(menu, trimmed, armorId, model, io)
+      if (next === 'new') { if (busy) { pending = 'new' } else done('new') }
+      else prompt()
+      return
+    }
     if (menu.stage !== 'off' && !trimmed.startsWith('/')) {
       const next = await pickFromMenu(ctx, io, menu, trimmed)
       if (next === 'new') { if (busy) { pending = 'new' } else done('new') }
@@ -756,12 +831,35 @@ ${armorLine}
       if (busy) { pending = 'new' }
       return
     }
+    if (trimmed === '/armor') {
+      if (menu.stage !== 'off') { io.stdout.write('(菜单已经打开)\n'); prompt(); return }
+      renderArmorMenu(io, menu)
+      return
+    }
     if (trimmed === '/config') {
       io.stdout.write(configSummary() + '\n')
       prompt(); return
     }
     if (trimmed === '/cwd') {
       io.stdout.write(`工作区: ${workspace}\n`)
+      prompt(); return
+    }
+    if (trimmed === '/goal-pause' || trimmed === '暂停目标') {
+      const goal = currentGoal()
+      if (goal === undefined) io.stdout.write('当前没有目标。\n')
+      else {
+        try { ctx.get('goals')?.pause(agent, { id: goal.id, revision: goal.revision }) }
+        catch (error) { io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`) }
+      }
+      prompt(); return
+    }
+    if (trimmed === '/goal-clear' || trimmed === '清除目标') {
+      const goal = currentGoal()
+      if (goal === undefined) io.stdout.write('当前没有目标。\n')
+      else {
+        try { ctx.get('goals')?.clear(agent, { id: goal.id, revision: goal.revision }) }
+        catch (error) { io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`) }
+      }
       prompt(); return
     }
     if (trimmed === '/skills' || trimmed.startsWith('/skill-install ')) {
@@ -780,15 +878,15 @@ ${armorLine}
     }
     if (trimmed === '') { prompt(); return }
 
-    if (busy) {
-      io.stdout.write('(还在处理，等提示符再输入)\n')
+    const played = playArmorPhrase(trimmed)
+    if (played !== null) {
+      io.stdout.write(played + '\n')
+      prompt()
       return
     }
 
-    const passphraseAck = applyArmorPassphrase(armorId, trimmed, model)
-    if (passphraseAck !== null) {
-      io.stdout.write(passphraseAck + '\n')
-      prompt()
+    if (busy) {
+      io.stdout.write('(还在处理，等提示符再输入)\n')
       return
     }
 
@@ -801,6 +899,32 @@ ${armorLine}
         io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
       } else if (outcome.reason?.kind === 'aborted') {
         io.stderr.write('dsh: 本轮超时或已取消（接口可能不可达，换个模型试试）\n')
+      }
+      // Desktop GoalBar: keep the REPL occupied while a same-session goal is armed.
+      // goal-round-driver queues the next round on idle; wait for running→idle
+      // so we do not spin on an already-idle agent.
+      while (pending === undefined) {
+        const goal = currentGoal()
+        if (goal === undefined || goal.phase !== 'active' || goal.activation !== 'armed') break
+        io.stdout.write(`${formatGoalBar(goal)}\n(目标续跑中… Ctrl+C 取消 / 暂停目标)\n`)
+        const seqBefore = agent.session.seq
+        await new Promise<void>((resolveWait) => {
+          const stop = ctx.on('agent/status', ({ agent: subject, status }) => {
+            if (subject !== agent || status !== 'idle') return
+            stop()
+            resolveWait()
+          }, { global: true })
+          if (agent.status === 'idle') {
+            const again = currentGoal()
+            if (again === undefined || again.phase !== 'active' || again.activation !== 'armed') {
+              stop()
+              resolveWait()
+            }
+          }
+        })
+        await sessions.flush(agent.session)
+        const later = summarizeTurn(agent.session.events, seqBefore)
+        if (later.text !== '') io.stdout.write(later.text + '\n')
       }
     } catch (error) {
       io.stderr.write(`dsh: turn failed: ${error instanceof Error ? error.message : String(error)}\n`)

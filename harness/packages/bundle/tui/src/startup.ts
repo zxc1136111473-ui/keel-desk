@@ -68,6 +68,7 @@ function tuiCommand(): Command {
   5 /quit      退出
   6 /cwd       工作区
   7 /skills    技能
+  8 /armor     工作模式 / 破甲
 示例：
   dsh                                        直接进入交互菜单
   dsh tui                                    同上

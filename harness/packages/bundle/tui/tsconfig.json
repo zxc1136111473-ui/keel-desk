@@ -43,6 +43,9 @@
     },
     {
       "path": "../../skill/skill"
+    },
+    {
+      "path": "../../goal/goal"
     }
   ]
 }

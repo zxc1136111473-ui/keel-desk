@@ -19,21 +19,17 @@ export const inject = ['loader', 'systemPrompt', 'tools']   // ❌ 缺 webServer
 → `/api/coldbrew/*`、`/api/desktop-manager/*`、`/api/pentagi/*` 路由**全部不注册**
 → GUI 里 PentAGI 面板、冷咖啡、安装按钮全部 404（本次事故根因）。
 
-**当前状态**：
-| 位置 | inject | 状态 |
-|---|---|---|
-| 已装 App `desktop-plugins/.../lib/index.mjs` | ✅ 含 webServer | 已修 |
-| 已装 App `node_modules/@deepseek-ai/dsh-desktop-manager` | ✅ 含 webServer | 已修 |
-| `release-runtime/harness/.../lib/index.mjs` | ✅ 含 webServer | 已修 |
-| 仓库 `desktop-plugins/dsh-manager/lib/index.mjs` | ❌ 缺 | **未修（必回归点）** |
-| 仓库 `desktop-plugins/dsh-manager/src/index.mjs` | ❌ 缺 | **未修（必回归点）** |
+**当前状态（已定稿，不要把 `webServer` 写回必选 inject）**：
 
-**处置**：必须把下面这行写回两处源码（git 提交固化）：
+`src/index.mjs` 与 `lib/index.mjs` 都是：
+
 ```js
-export const inject = ['webServer', 'loader', 'systemPrompt', 'tools']
+export const inject = ['loader', 'systemPrompt', 'tools']
 ```
-> ⚠️ 若重新跑 `pnpm run build`（plugin:build）会重新生成 lib/，**覆盖**已修的手改。
-> 所以源码不修，任何重打包都回归。**这是本次排查最重要的一条。**
+
+GUI 用 `ctx.inject(['webServer'], registerHttp)` 等 HTTP 层出现后再挂路由。CLI/TUI 没有 Host，必选 `webServer` 会让插件一直 waiting，pg_* 工具挂不上。
+
+核对 GUI：`curl http://127.0.0.1:<port>/api/coldbrew/profiles` 应返回 JSON，不是 HTML。
 
 ---
 
@@ -93,10 +89,11 @@ curl -X POST -H "Content-Type: application/json" -d '{"mode":"pentagi"}'   http:
 对 142MB 的嵌入式 `node` 跑 `codesign --force --sign <证书>` 会**挂死**
 （0% CPU 等待 keychain 授权，非慢）。9月16 打包时实测两次超时。
 
-**处置（已固化到本次 macOS 产物）**：
-- 嵌入式 node 复用**已签名版本**（Sep 6 签过、带 allow-jit entitlements），不要重签；
-- 主二进制 + bundle 用 **ad-hoc 签名**（`--sign -`）完成，验证通过；
-- 或跑 `scripts/macos-stable-sign.sh` 时确保 keychain 已解锁且 node 已预先签名。
+**处置（`scripts/macos-stable-sign.sh`）**：
+- OpenSSL 3 导出 PKCS12 必须带 `-legacy`，否则 `security import` 报 MAC verification failed。
+- 嵌入式 node（~140MB）已带 `allow-jit` 则不重签；否则从 `/Applications/DeepSeek Harness.app` 拷一份签过的二进制。
+- 没有本地 codesign 身份时脚本 exit 0，保留 Tauri ad-hoc 签名，不阻断打包。
+- TCC sqlite 写入失败只记日志，不失败整个发布。
 
 ---
 

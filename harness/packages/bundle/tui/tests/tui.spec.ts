@@ -12,7 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
-import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { Readable } from 'node:stream'
@@ -194,10 +194,10 @@ describe('tui runner', () => {
   it('轨迹 dumps USER and ASSISTANT rows without a model turn', async () => {
     const test = await bench({
       before(session) {
-        appendTurn(session, 1, {
+        appendTurn(session, 1, createUserMessage({
           content: [{ type: 'text', text: 'Reply with exactly: TUI_OK' }],
           source: { kind: 'user' },
-        }, 'TUI_OK', true)
+        }), 'TUI_OK', true)
       },
       afterPrompt() {
         throw new Error('轨迹 must not start a model turn')

@@ -24,8 +24,8 @@ describe('dsh SOURCE launcher (node --import tsx/esm)', () => {
     expect(rootPackage.scripts?.dsh).toBe('node --import tsx/esm apps/cli/src/bin.ts')
   })
 
-  it('boots the source entry and requires a profile', async () => {
-    const result = await execa(process.execPath, ['--import', 'tsx/esm', dshSourceBin], {
+  it('boots the source entry and prints launcher help', async () => {
+    const result = await execa(process.execPath, ['--import', 'tsx/esm', dshSourceBin, '--help'], {
       cwd: repoRoot,
       input: '',
       timeout: 25_000,
@@ -35,8 +35,7 @@ describe('dsh SOURCE launcher (node --import tsx/esm)', () => {
     if (result.timedOut) {
       throw new Error(`dsh source launch did not exit within 25s. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
     }
-    expect(result.exitCode).not.toBe(0)
-    expect(result.stderr).toContain('--profile <name> is required')
-    expect(result.stdout).toBe('')
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('dsh tui')
   }, 30_000)
 })

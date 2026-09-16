@@ -11,6 +11,8 @@ The session id is stable within a process (`session-<random UUID>`), and `/new` 
 ## Usage
 
 ```sh
+dsh                                            # interactive TUI (default)
+dsh tui                                        # same as --profile tui
 dsh --profile tui                              # interactive session
 dsh --profile tui -e "recon the target"        # run one task, then keep the REPL open
 dsh --profile tui --session my-session         # pin a stable session id
@@ -20,9 +22,13 @@ dsh --profile tui --session my-session         # pin a stable session id
 
 | Command | Action |
 |---|---|
-| `/quit` `/exit` | Exit the process with code 0. |
-| `/new` | Start a fresh session (new UUID, prior context lost). |
-| `/help` | Show available commands. |
+| `1` `/model` | Numbered menu of configured providers/models; pick one as the default. |
+| `2` `/config` | Print the current default model and provider inventory. |
+| `3` `/help` | Reprint the command menu. |
+| `4` `/new` | Start a fresh session (new UUID, prior context lost). |
+| `5` `/quit` `/exit` | Exit the process with code 0. |
+
+The REPL uses cooked line input (`readline` `terminal: false`) so kernel/IME echo is not doubled on macOS. Command menus are printed in Chinese.
 
 ## Mounting desktop tools (pg_*, ColdBrew, Reverify)
 

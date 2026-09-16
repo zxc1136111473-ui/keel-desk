@@ -613,6 +613,8 @@ function PentagiCard(props: {
   onSyncModels: () => void
   onEmbedder: (op: 'start' | 'stop') => void
   onInstallDocker: () => void
+  onInstallAll: () => void
+  onUninstallAll: () => void
 }) {
   const view = describePentagi(props.status)
   const running = props.status?.compose?.running === true || props.status?.api?.ok === true
@@ -790,42 +792,56 @@ function PentagiCard(props: {
               ? '本机向量服务已在跑。点「停止本机向量」才释放内存。'
               : props.status?.embedding?.fastembed?.ok
                 ? '依赖已装。点「启动本机向量」才会占大约半 GB，不会动 Grok。'
-                : '别的电脑第一次：点「安装并启动」会先 pip install fastembed，再下载约 270MB 模型，然后监听 :63229。需要本机 python3。'}
+                : '第一次会在 ~/.dsh/pentagi/embedder-venv 里装 fastembed（不碰 Homebrew Python），再下载约 270MB 模型，然后监听 :63229。需要本机 python3。'}
           </span>
         )}
       </div>
       <div className="dsm-actions">
-        <Button onClick={props.onProbe} disabled={props.busy} variant="outline" size="sm">
-          重新探测
-        </Button>
-        {!(props.status?.docker?.ok && props.status?.docker?.daemon) && (
-          <Button onClick={props.onInstallDocker} disabled={props.busy} variant="primary" size="sm">
-            {props.busy ? '正在安装 Docker…' : '安装 Docker 依赖'}
+        <div className="dsm-action-group">
+          <Button onClick={props.onProbe} disabled={props.busy} variant="outline" size="sm">
+            重新探测
           </Button>
-        )}
-        <Button onClick={props.onStart} disabled={props.busy} variant="primary" size="sm">
-          {props.busy ? '正在启动…' : running ? '重新启动后端' : '启动后端'}
-        </Button>
-        <Button onClick={props.onStop} disabled={props.busy || !running} variant="outline" size="sm">
-          {props.busy ? '正在停止…' : '停止后端'}
-        </Button>
-        <Button onClick={props.onSyncModels} disabled={props.busy} variant="outline" size="sm">
-          {props.busy ? '正在同步…' : '同步 Harness 模型'}
-        </Button>
-        {embeddingSource === 'local' && !localEmbedOn && (
-          <Button onClick={() => props.onEmbedder('start')} disabled={props.busy} variant="primary" size="sm">
+          <Button onClick={props.onInstallAll} disabled={props.busy} variant="primary" size="sm">
+            {props.busy ? '正在安装全部…' : '安装全部后端'}
+          </Button>
+          <Button onClick={props.onUninstallAll} disabled={props.busy} variant="outline" size="sm">
+            {props.busy ? '正在卸载…' : '卸载全部后端'}
+          </Button>
+        </div>
+        <div className="dsm-action-group">
+          <Button onClick={props.onInstallDocker} disabled={props.busy} variant="outline" size="sm">
             {props.busy
-              ? '正在安装/启动…'
-              : props.status?.embedding?.fastembed?.ok
-                ? '启动本机向量'
-                : '安装并启动本机向量'}
+              ? '正在安装 Docker…'
+              : (props.status?.docker?.ok && props.status?.docker?.daemon)
+                ? '重装/修复 Docker 依赖'
+                : '安装 Docker 依赖'}
           </Button>
-        )}
-        {embeddingSource === 'local' && localEmbedOn && (
-          <Button onClick={() => props.onEmbedder('stop')} disabled={props.busy} variant="outline" size="sm">
-            {props.busy ? '正在停止…' : '停止本机向量'}
+          <Button onClick={props.onStart} disabled={props.busy} variant="primary" size="sm">
+            {props.busy ? '正在启动…' : running ? '重新启动后端' : '启动后端'}
           </Button>
-        )}
+          <Button onClick={props.onStop} disabled={props.busy || !running} variant="outline" size="sm">
+            {props.busy ? '正在停止…' : '停止后端'}
+          </Button>
+          <Button onClick={props.onSyncModels} disabled={props.busy} variant="outline" size="sm">
+            {props.busy ? '正在同步…' : '同步 Harness 模型'}
+          </Button>
+        </div>
+        <div className="dsm-action-group">
+          {embeddingSource === 'local' && !localEmbedOn && (
+            <Button onClick={() => props.onEmbedder('start')} disabled={props.busy} variant="primary" size="sm">
+              {props.busy
+                ? '正在安装/启动…'
+                : props.status?.embedding?.fastembed?.ok
+                  ? '启动本机向量'
+                  : '安装并启动本机向量'}
+            </Button>
+          )}
+          {embeddingSource === 'local' && localEmbedOn && (
+            <Button onClick={() => props.onEmbedder('stop')} disabled={props.busy} variant="outline" size="sm">
+              {props.busy ? '正在停止…' : '停止本机向量'}
+            </Button>
+          )}
+        </div>
       </div>
     </article>
   )
@@ -844,6 +860,7 @@ function useToast() {
 function PentagiSection() {
   const [pentagi, setPentagi] = useState<PentagiStatus | null>(null)
   const [logs, setLogs] = useState<string[]>([])
+  const [progress, setProgress] = useState<{ step: number; total: number; label: string; percent: number; elapsedSec?: number; etaSec?: number | null } | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const { toast, setToast, showToast } = useToast()
@@ -854,6 +871,8 @@ function PentagiSection() {
       const res = await fetch('/api/coldbrew/pentagi/logs')
       const data = await res.json().catch(() => ({ logs: [] }))
       if (Array.isArray(data.logs) && data.logs.length > 0) setLogs(data.logs)
+      if (data.progress) setProgress(data.progress)
+      else if (!data.isRunning) setProgress(null)
     } catch (error) {
       console.error('Failed to fetch pentagi logs', error)
     }
@@ -960,6 +979,60 @@ function PentagiSection() {
 
   const runningLooksLikeDocker = (data: { runningTask?: string }) => data.runningTask === 'docker-install'
 
+  const installAllPentagi = async () => {
+    setBusy(true)
+    setLogs(['=== 一键安装全部后端：Docker/Colima → 后端 compose → 本机向量 ==='])
+    startPolling()
+    try {
+      const res = await fetch('/api/coldbrew/pentagi/install-all', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (Array.isArray(data.logs) && data.logs.length > 0) setLogs(data.logs)
+      if (data.isRunning) {
+        showToast('正在一键安装（含 Docker → 后端 → 向量），看下面日志，装完自动刷新')
+        return
+      }
+      if (!res.ok) throw new Error(data.error ?? '一键安装失败')
+      setPentagi(data)
+      showToast('全部后端安装完成：Docker + compose + token + Kali + 向量')
+    } catch (error: any) {
+      showToast(`一键安装失败: ${error.message}`)
+    } finally {
+      if (pollTimer.current) {
+        clearInterval(pollTimer.current)
+        pollTimer.current = null
+      }
+      setBusy(false)
+      await refresh()
+    }
+  }
+
+  const uninstallAllPentagi = async () => {
+    setBusy(true)
+    setLogs(['=== 一键卸载全部后端：向量 → compose down → 删镜像 → 删源码 ==='])
+    startPolling()
+    try {
+      const res = await fetch('/api/coldbrew/pentagi/uninstall-all', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (Array.isArray(data.logs) && data.logs.length > 0) setLogs(data.logs)
+      if (data.isRunning) {
+        showToast('正在卸载全部后端，看下面日志')
+        return
+      }
+      if (!res.ok) throw new Error(data.error ?? '卸载失败')
+      setPentagi(data)
+      showToast('全部后端已卸载：容器/镜像/源码/向量都已清理')
+    } catch (error: any) {
+      showToast(`卸载失败: ${error.message}`)
+    } finally {
+      if (pollTimer.current) {
+        clearInterval(pollTimer.current)
+        pollTimer.current = null
+      }
+      setBusy(false)
+      await refresh()
+    }
+  }
+
   const installDocker = async () => {
     setBusy(true)
     setLogs(['检查本机架构并安装 Docker（Windows 装 Docker Desktop，macOS 走 Colima），随后拉取 PentAGI 镜像…'])
@@ -1062,6 +1135,8 @@ function PentagiSection() {
           onSyncModels={() => { void syncPentagiModels() }}
           onEmbedder={(op) => { void runEmbedder(op) }}
           onInstallDocker={() => { void installDocker() }}
+          onInstallAll={() => { void installAllPentagi() }}
+          onUninstallAll={() => { void uninstallAllPentagi() }}
         />
       </div>
       {(busy || logs.length > 0) && (
@@ -1070,6 +1145,29 @@ function PentagiSection() {
             <span>任务实时日志</span>
             {busy && <span className="dsm-logs-running">正在执行…</span>}
           </div>
+          {progress && (
+            <div className="dsm-progress">
+              <div className="dsm-progress-bar">
+                <div className="dsm-progress-fill" style={{ width: `${progress.percent}%` }} />
+              </div>
+              <div className="dsm-progress-meta">
+                <span className="dsm-progress-label">
+                  第 {progress.step}/{progress.total} 步 · {progress.label}
+                </span>
+                <span className="dsm-progress-pct">{progress.percent}%</span>
+                <span className="dsm-progress-eta">
+                  {progress.etaSec === null
+                    ? '估算中…'
+                    : progress.etaSec === 0
+                      ? '即将完成'
+                      : progress.etaSec >= 60
+                        ? `约 ${Math.round(progress.etaSec / 60)} 分钟`
+                        : `约 ${progress.etaSec} 秒`}
+                  {progress.elapsedSec !== undefined ? ` · 已用 ${progress.elapsedSec} 秒` : ''}
+                </span>
+              </div>
+            </div>
+          )}
           <TerminalBlock
             className="dsm-terminal"
             command="PentAGI 后端"

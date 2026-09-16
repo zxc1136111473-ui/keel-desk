@@ -36,7 +36,9 @@ import {
 import { snapshotHarnessLlms, inspectHarnessLlms, pickHarnessLlm, applyLlmToEnvText, syncGraphqlProviders } from './pentagi-providers.mjs'
 
 export const name = 'dsh-desktop-manager'
-export const inject = ['webServer', 'loader', 'systemPrompt', 'tools']
+// webServer 不能写进必选 inject：CLI/TUI 没有 HTTP 层，写了会一直 waiting。
+// GUI 用 ctx.inject(['webServer']) 等服务出现后再注册路由。
+export const inject = ['loader', 'systemPrompt', 'tools']
 export { ARMOR_MODES, DEFAULT_ARMOR_MODE, normalizeArmorMode }
 
 const repositoryRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
@@ -243,8 +245,8 @@ function sessionArmorMode(state, settings) {
   if (state?.mode !== undefined && state?.mode !== null && String(state.mode).length > 0) {
     return normalizeArmorMode(state.mode)
   }
-  // 落盘过的旧会话没有 mode 字段：锁冷咖啡，避免设置页一切就把长会话内核换掉。
-  if (state !== undefined && state !== null) return DEFAULT_ARMOR_MODE
+  // 旧会话没写 mode：跟全局设置走。不要锁死 DEFAULT_ARMOR_MODE（coldbrew），
+  // 否则装完 PentAGI 后老会话永远不注入 pg_* 内核。
   return settingsArmorMode(settings)
 }
 
@@ -306,6 +308,29 @@ async function saveColdbrewSessions(sessions) {
   const dest = coldbrewStateFile()
   await mkdir(userDataHome(), { recursive: true })
   await writeFile(dest, JSON.stringify(sessions, null, 2))
+}
+
+/**
+ * CLI/TUI 口令落盘：打开本会话破甲并钉死模式（冷咖啡 / reverify / pentagi）。
+ * 下一轮 systemPrompt 组装会读到这份记录。
+ */
+export function enableArmorSession(sessionId, options = {}) {
+  const id = String(sessionId ?? '').trim()
+  if (!id) return null
+  const settings = loadSettingsSync()
+  const sessions = loadSessionStatesSync()
+  const previous = sessions[id]
+  const nextMode = normalizeArmorMode(options.mode ?? previous?.mode ?? settingsArmorMode(settings))
+  sessions[id] = {
+    enabled: options.enabled !== false,
+    model: String(options.model ?? previous?.model ?? ''),
+    mode: nextMode,
+  }
+  sessionStates = sessions
+  const dest = coldbrewStateFile()
+  mkdirSync(userDataHome(), { recursive: true })
+  writeFileSync(dest, JSON.stringify(sessions, null, 2))
+  return sessions[id]
 }
 
 /**
@@ -471,31 +496,6 @@ async function probePentagi() {
 }
 
 export function apply(ctx) {
-  // CLI 模式（无 webServer）不自动拉起 PentAGI compose：终端里拉一堆容器
-  // 既拖慢启动也没人看状态。GUI 里保留 autostart 行为。
-  const hasWeb = ctx.get('webServer') !== undefined
-  if (hasWeb) {
-    const pentagiCfg = (() => {
-      try { return loadSettingsSync()?.coldbrew?.pentagi ?? {} } catch { return {} }
-    })()
-    if (pentagiCfg.autostart !== false) {
-      setTimeout(() => {
-        startPentagiRuntime((line) => {
-          taskLogs.push(line)
-          if (taskLogs.length > 400) taskLogs = taskLogs.slice(-300)
-        }).catch((error) => {
-          taskLogs.push(`pentagi autostart: ${error?.message ?? error}`)
-        })
-      }, 1500)
-    }
-  }
-  const shutdown = () => {
-    if (!pentagiStopOnExit()) return
-    stopPentagiRuntime((line) => taskLogs.push(line)).catch(() => {})
-  }
-  process.once('exit', shutdown)
-  process.once('SIGINT', () => { shutdown(); process.exit(0) })
-  process.once('SIGTERM', () => { shutdown(); process.exit(0) })
 
   // 按会话注入系统提示词：文本提供器在每次组装时以该会话的 agent 为 scope 求值，
   // 会话开关开启且模型命中某个 profile 时返回对应破甲正文，否则返回空串（不贡献内容）。
@@ -602,8 +602,28 @@ export function apply(ctx) {
     }), `dsh-desktop-manager: ${tool.name}`)
   }
 
-  const webServer = ctx.get('webServer')
-  if (webServer !== undefined) {
+  const registerHttp = (webCtx) => {
+    const webServer = webCtx.webServer
+    const pentagiCfg = (() => {
+      try { return loadSettingsSync()?.coldbrew?.pentagi ?? {} } catch { return {} }
+    })()
+    if (pentagiCfg.autostart !== false) {
+      setTimeout(() => {
+        startPentagiRuntime((line) => {
+          taskLogs.push(line)
+          if (taskLogs.length > 400) taskLogs = taskLogs.slice(-300)
+        }).catch((error) => {
+          taskLogs.push(`pentagi autostart: ${error?.message ?? error}`)
+        })
+      }, 1500)
+    }
+    const shutdown = () => {
+      if (!pentagiStopOnExit()) return
+      stopPentagiRuntime((line) => taskLogs.push(line)).catch(() => {})
+    }
+    process.once('exit', shutdown)
+    process.once('SIGINT', () => { shutdown(); process.exit(0) })
+    process.once('SIGTERM', () => { shutdown(); process.exit(0) })
     webServer.register({
       kind: 'prefix',
       path: '/api/desktop-manager',
@@ -676,9 +696,8 @@ export function apply(ctx) {
         res.end()
       },
     })
-  }
 
-  if (webServer !== undefined) { webServer.register({
+    webServer.register({
     kind: 'prefix',
     path: '/api/coldbrew',
     handler: async (req, res) => {
@@ -1160,11 +1179,13 @@ export function apply(ctx) {
               try {
                 const s = await getSettings()
                 s.coldbrew ??= {}
-                if (s.coldbrew.armorMode !== 'pentagi') {
+                const needMode = s.coldbrew.armorMode !== 'pentagi'
+                const needOn = s.coldbrew.defaultEnabled !== true
+                if (needMode || needOn) {
                   s.coldbrew.armorMode = 'pentagi'
-                  if (s.coldbrew.defaultEnabled !== true) s.coldbrew.defaultEnabled = true
+                  s.coldbrew.defaultEnabled = true
                   await saveSettings(s)
-                  log('已激活 PentAGI 模式（armorMode=pentagi）· 模型将自动调用 pg_* 工具')
+                  log('已激活 PentAGI 模式（armorMode=pentagi, defaultEnabled=true）· 模型将自动调用 pg_* 工具')
                 }
               } catch (err) {
                 log(`激活 PentAGI 模式失败（可手动在设置页切换）: ${err?.message ?? err}`)
@@ -1376,5 +1397,10 @@ export function apply(ctx) {
       res.end()
     },
   })
-  } // if webServer
+  }
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], registerHttp)
+  } else if (ctx.webServer !== undefined) {
+    registerHttp(ctx)
+  }
 }

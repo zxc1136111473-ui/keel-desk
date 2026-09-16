@@ -37,3 +37,8 @@
         provider: !!js ctx.tuiStartup.provider
         model: !!js ctx.tuiStartup.model
         check: !!js ctx.tuiStartup.check
+
+    # Host plugin: pg_* / ColdBrew / Reverify. No HTTP in TUI — apply()
+    # registers tools + systemPrompt; webServer routes wait via ctx.inject.
+    - id: desktop-manager
+      name: '@deepseek-ai/dsh-desktop-manager'

@@ -53,6 +53,8 @@ export const apply = ctx => globalThis.__headlessStartupApply(ctx)
     `  inject: [${HEADLESS_STARTUP_SERVICE}]`,
     '  config:',
     '    task: !!js ctx.headlessStartup.task',
+    '    provider: !!js ctx.headlessStartup.provider',
+    '    model: !!js ctx.headlessStartup.model',
     '- id: headless-startup',
     `  name: ${pathToFileURL(join(dir, 'startup.mjs')).href}`,
     '',
@@ -83,8 +85,15 @@ export const apply = ctx => globalThis.__headlessStartupApply(ctx)
 describe('headless command-line provider', () => {
   it('joins the task positional into the runner config', async () => {
     const { task, observed } = await bootStartup(['run', 'the', 'tests'])
-    expect(task).toEqual({ task: 'run the tests' })
-    expect(observed.runnerConfig).toEqual({ task: 'run the tests' })
+    expect(task).toEqual({ task: 'run the tests', provider: '', model: '' })
+    expect(observed.runnerConfig).toMatchObject({ task: 'run the tests' })
+    expect(observed.exits).toEqual([])
+  })
+
+  it('carries --provider and --model into the runner config', async () => {
+    const { task, observed } = await bootStartup(['--provider', 'kiro', '--model', 'claude-opus-4.8', 'run', 'the', 'tests'])
+    expect(task).toEqual({ task: 'run the tests', provider: 'kiro', model: 'claude-opus-4.8' })
+    expect(observed.runnerConfig).toMatchObject({ task: 'run the tests' })
     expect(observed.exits).toEqual([])
   })
 

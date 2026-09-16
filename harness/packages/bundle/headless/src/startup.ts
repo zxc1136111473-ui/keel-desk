@@ -22,10 +22,14 @@ export const HEADLESS_STARTUP_SERVICE = 'headlessStartup'
 export interface HeadlessStartupValues {
   /** The task text this invocation asked for. */
   task: string
+  /** Provider route override; empty keeps the settings default. */
+  provider: string
+  /** Model id override; empty keeps the settings default. */
+  model: string
 }
 
 /**
- * This app's command: the task positional, its description, and its help text.
+ * This app's command: the task positional, model flags, and its help text.
  * @returns a fresh program, so one process can parse more than once (tests).
  */
 function headlessCommand(): Command {
@@ -34,16 +38,17 @@ function headlessCommand(): Command {
     .description('Answer one task, print the final assistant message, and exit.')
     .helpOption('-h, --help', 'show this help')
     .argument('[task...]', 'the task text; multiple words are joined by spaces')
+    .option('--provider <name>', 'provider route override (empty keeps the settings default)')
+    .option('--model <id>', 'model id override (empty keeps the settings default)')
     .addHelpText('after', `
 Examples:
-  dsh --profile headless "run the tests"     answer one task and exit
+  dsh --profile headless "run the tests"                                        answer one task and exit
+  dsh --profile headless --provider kiro --model claude-opus-4.8 "recon target"  use a different model
 `)
 }
 
 /**
- * Parse and provide the one-shot task as an ordinary Cordis service. The
- * command's action publishes the task; a missing or whitespace-only task is a
- * usage error, so on rejection (and on `--help`) nothing is provided.
+ * Parse and provide the one-shot task and model overrides as an ordinary Cordis service.
  * @param ctx - plugin context carrying the command line.
  */
 export function apply(ctx: Context): void {
@@ -51,7 +56,11 @@ export function apply(ctx: Context): void {
   program.action(() => {
     const task = program.args.join(' ')
     if (task.trim() === '') program.error('error: a task is required, for example: dsh --profile headless "run the tests"')
-    ctx.provide(HEADLESS_STARTUP_SERVICE, { task } satisfies HeadlessStartupValues)
+    ctx.provide(HEADLESS_STARTUP_SERVICE, {
+      task,
+      provider: (program.getOptionValue('provider') as string | undefined) ?? '',
+      model: (program.getOptionValue('model') as string | undefined) ?? '',
+    } satisfies HeadlessStartupValues)
   })
   parseCmdline(ctx, program)
 }

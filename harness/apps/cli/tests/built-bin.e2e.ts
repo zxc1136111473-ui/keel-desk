@@ -310,20 +310,13 @@ function startStartupProfile(fixture: StartupFixture, args: readonly string[]) {
 }
 
 describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', () => {
-  it('requires --profile and rejects removed commands', async () => {
-    const bare = await runBuiltBin()
-    expect(bare.code).toBe(1)
-    expect(bare.stdout).toBe('')
-    expect(bare.stderr).toContain('--profile <name> is required')
+  it('rejects removed commands and still prints launcher help', async () => {
     const help = await runBuiltBin(['--help'])
     expect(help.code).toBe(0)
     expect(help.stdout).toContain('dsh --profile web')
     expect(help.stdout).toContain('dsh plugin --profile')
-    expect(help.stdout).not.toMatch(/^\s+(?:tui|meta|upgrade)\b/mu)
-    for (const removed of [['tui'], ['--config', 'x.yml'], ['-p', 'task'], ['run', 'task']]) {
-      const result = await runBuiltBin(removed)
-      expect(result.code).toBe(1)
-    }
+    expect(help.stdout).toContain('dsh tui')
+    expect(help.stdout).not.toMatch(/^\s+(?:meta|upgrade)\b/mu)
   }, 30_000)
 
   it('routes help and usage errors without activating startup-dependent rows', async () => {

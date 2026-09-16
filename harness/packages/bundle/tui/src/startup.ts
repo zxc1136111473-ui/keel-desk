@@ -52,23 +52,27 @@ function parseFlags(program: Command): TuiStartupValues {
 function tuiCommand(): Command {
   return new Command()
     .name('dsh --profile tui')
-    .description('Start an interactive terminal conversation; type a message, /quit to exit.')
-    .helpOption('-h, --help', 'show this help')
-    .option('--session <id>', 'stable session id to resume or create')
-    .option('-e, --task <task>', 'submit one task immediately after boot, then keep the REPL open')
-    .option('--provider <name>', 'provider route override (empty keeps the settings default)')
-    .option('--model <id>', 'model id override (empty keeps the settings default)')
-    .option('--check', 'print the loaded plugin and tool inventory, then exit')
+    .description('启动交互式终端对话；看到 dsh> 后打字，/quit 退出。')
+    .helpOption('-h, --help', '显示帮助')
+    .option('--session <id>', '会话 id（续用或新建）')
+    .option('-e, --task <task>', '启动后先跑一条任务，再进入对话')
+    .option('--provider <name>', '指定接口商（空则用默认）')
+    .option('--model <id>', '指定模型（空则用默认）')
+    .option('--check', '打印已加载插件和工具后退出')
     .addHelpText('after', `
-Commands in the REPL:
-  /quit /exit       end the session and exit
-  /help             show this help
-  /new              reset to a fresh session (loses thread context)
-Examples:
-  dsh --profile tui                          start an interactive session
-  dsh --profile tui -e "recon the target"    run one task, then continue interactively
-  dsh --profile tui --provider kiro --model claude-opus-4.8
-  dsh --profile tui --check                  verify plugins/tools loaded, then exit
+进入 dsh> 后的命令（数字、斜杠、中文名都行）：
+  1 /model     模型 / 选择模型
+  2 /config    配置 / 设置
+  3 /help      帮助 / 菜单
+  4 /new       新会话
+  5 /quit      退出
+  6 /cwd       工作区
+  7 /skills    技能
+示例：
+  dsh                                        直接进入交互菜单
+  dsh tui                                    同上
+  dsh --profile tui -e "recon the target"    先跑一条任务再对话
+  dsh --profile tui --check                  检查插件/工具后退出
 `)
 }
 

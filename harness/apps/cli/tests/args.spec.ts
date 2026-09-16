@@ -28,6 +28,10 @@ describe('parseDshArgs', () => {
     expect(parse(['web'])).toEqual({ mode: 'profile', profile: 'web', patches: [], args: [] })
     expect(parse(['web', '--patch', 'web.yml']))
       .toEqual({ mode: 'profile', profile: 'web', patches: ['web.yml'], args: [] })
+    expect(parse([])).toEqual({ mode: 'profile', profile: 'tui', patches: [], args: [] })
+    expect(parse(['tui'])).toEqual({ mode: 'profile', profile: 'tui', patches: [], args: [] })
+    expect(parse(['tui', '--check']))
+      .toEqual({ mode: 'profile', profile: 'tui', patches: [], args: ['--check'] })
   })
 
   it('ends the launcher flags at the first token it does not own', () => {
@@ -70,19 +74,30 @@ describe('parseDshArgs', () => {
       .toEqual({ mode: 'dump-config', profile: 'web', defaultOnly: true, patches: [] })
   })
 
-  it('rejects missing profile, removed flags, and contradictory inputs', () => {
-    expect(exitCode([])).toBe(1)
-    expect(exitCode(['tui'])).toBe(1) // an app argument without --profile has no app to reach
-    expect(exitCode(['--config', 'c.yml'])).toBe(1) // removed
-    expect(exitCode(['-p', 'task'])).toBe(1) // removed
-    expect(exitCode(['run', 'task'])).toBe(1) // app-owned task replaced the launcher subcommand
+  it('hands unknown tokens on a bare invocation to the TUI app', () => {
+    expect(parse(['--config', 'c.yml'])).toEqual({
+      mode: 'profile', profile: 'tui', patches: [], args: ['--config', 'c.yml'],
+    })
+    expect(parse(['-p', 'task'])).toEqual({
+      mode: 'profile', profile: 'tui', patches: [], args: ['-p', 'task'],
+    })
+    expect(parse(['run', 'task'])).toEqual({
+      mode: 'profile', profile: 'tui', patches: [], args: ['run', 'task'],
+    })
+    expect(parse(['--bogus'])).toEqual({
+      mode: 'profile', profile: 'tui', patches: [], args: ['--bogus'],
+    })
+  })
+
+  it('rejects contradictory launcher inputs', () => {
     expect(exitCode(['--profile', ''])).toBe(1)
     expect(exitCode(['--profile', 'x', '--patch='])).toBe(1)
-    expect(exitCode(['--dump-config'])).toBe(1)
+    expect(parse(['--dump-config'])).toEqual({
+      mode: 'dump-config', profile: 'tui', defaultOnly: false, patches: [],
+    })
     expect(exitCode(['--profile', 'x', '--dump-config', '--dump-default-config'])).toBe(1)
     expect(exitCode(['--profile', 'x', '--dump-default-config', '--patch', 'p.yml'])).toBe(1)
     expect(exitCode(['--profile', 'x', '--dump-config', 'task'])).toBe(1)
-    expect(exitCode(['--bogus'])).toBe(1)
     expect(exitCode(['--profile', 'x', 'web'])).toBe(1)
     expect(exitCode(['web', '--dump-config', '--dump-default-config'])).toBe(1)
     expect(exitCode(['web', '--dump-default-config', '--patch', 'w.yml'])).toBe(1)

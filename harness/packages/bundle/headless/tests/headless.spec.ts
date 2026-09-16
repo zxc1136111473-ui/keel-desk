@@ -247,6 +247,6 @@ describe('headless runner', () => {
 
   it('validates config: the task is required', () => {
     expect(() => new Config({} as never)).toThrow()
-    expect(new Config({ task: 'x' })).toEqual({ task: 'x' })
+    expect(new Config({ task: 'x' })).toEqual({ task: 'x', provider: '', model: '' })
   })
 })

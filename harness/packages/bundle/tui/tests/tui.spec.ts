@@ -4,6 +4,9 @@
  * exit 1.
  */
 
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
@@ -123,6 +126,26 @@ describe('tui runner', () => {
     }, ['Reply with exactly: TUI_OK\n', '/quit\n'])
     const result = await test.run()
     expect(result).toMatchObject({ code: 0, out: expect.stringContaining('TUI_OK'), err: '' })
+    expect(result.out).toContain('/model')
+    expect(result.out).toContain('/config')
+    expect(result.out).toContain('工作区:')
+    expect(result.out).toContain('破甲:')
+    expect(result.out).toContain('/skills')
+    expect(result.out).toContain('帮助 / 菜单')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('Chinese menu names open the help menu without a model turn', async () => {
+    const test = await bench({
+      afterPrompt() {
+        throw new Error('menu names must not start a model turn')
+      },
+    }, ['帮助\n', '菜单\n', '/quit\n'])
+    const result = await test.run()
+    expect(result.code).toBe(0)
+    expect(result.err).toBe('')
+    const helpHits = result.out.split('命令（数字、斜杠、或菜单上的中文名都可以）').length - 1
+    expect(helpHits).toBeGreaterThanOrEqual(3)
     await test.ctx.fiber.dispose()
   })
 
@@ -183,5 +206,46 @@ describe('tui runner', () => {
     expect(await exited).toBe(1)
     expect(err).toBe('dsh: factory exploded\n')
     await ctx.fiber.dispose()
+  })
+
+  it('opens readline in cooked line mode on non-TTY stdin so kernel/IME echo is not doubled', async () => {
+    const seen: Array<{ terminal?: boolean }> = []
+    const original = internals.createInterface
+    internals.createInterface = (options) => {
+      seen.push({ terminal: options.terminal ?? false })
+      return original(options)
+    }
+    const test = await bench({ afterPrompt: () => {} }, ['/quit\n'])
+    const result = await test.run()
+    internals.createInterface = original
+    expect(result.code).toBe(0)
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every(call => call.terminal === false)).toBe(true)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('whole-line 冷咖啡 passphrase acks without a model turn and persists the session', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-tui-armor-'))
+    const previous = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    try {
+      const test = await bench({
+        afterPrompt() {
+          throw new Error('passphrase must not start a model turn')
+        },
+      }, ['冷咖啡\n', '/quit\n'], { sessionId: 'session-cli-armor' })
+      const result = await test.run()
+      expect(result.code).toBe(0)
+      expect(result.out).toContain('MAX 已开，把对象发来')
+      expect(result.err).toBe('')
+      const disk = JSON.parse(readFileSync(join(home, 'coldbrew-sessions.json'), 'utf8')) as { 'session-cli-armor': { mode: string; enabled: boolean } }
+      expect(disk['session-cli-armor'].mode).toBe('coldbrew')
+      expect(disk['session-cli-armor'].enabled).toBe(true)
+      await test.ctx.fiber.dispose()
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previous
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

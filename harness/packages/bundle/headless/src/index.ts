@@ -31,10 +31,16 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions']
 export interface Config {
   /** The prompt text for the single run. */
   task: string
+  /** Provider route override; empty keeps the settings default. */
+  provider?: string
+  /** Model id override; empty keeps the settings default. */
+  model?: string
 }
 
 export const Config: z<Config> = z.object({
   task: z.string().required(),
+  provider: z.string().default(''),
+  model: z.string().default(''),
 })
 
 /** Outcome of one owned run interval. */
@@ -91,9 +97,10 @@ function fail(io: HeadlessIo, error: unknown): void {
  * Run one task through a freshly created Agent and request process exit.
  * @param ctx - plugin context carrying the Agent, default model, Session, and launcher IO services.
  * @param task - one-shot task text.
+ * @param config - boot config (provider/model overrides).
  * @param io - process-facing effects.
  */
-async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
+async function run(ctx: Context, task: string, config: Config, io: HeadlessIo): Promise<void> {
   // Loader siblings mount concurrently. Await the complete application before
   // creating an Agent so its scoped tools and adapters are not half-composed.
   await ctx.get('loader')?.await()
@@ -104,6 +111,13 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   if (agents === undefined || defaultModel === undefined || sessions === undefined) return
 
   const selection = defaultModel.currentSelection()
+  // Flag overrides win; a CLI override drops the settings reasoning effort
+  // (it was chosen for the default model and may not exist on the target).
+  const provider = String(config.provider ?? '').trim() || selection.provider
+  const model = String(config.model ?? '').trim() || selection.model
+  const effective = (config.provider || config.model)
+    ? { provider, model }
+    : { ...selection, provider, model }
   // This bundle composes no preset roster, so the model-facing rows sit in the
   // host plane and the agent reads them from the global layer. A deployment
   // that DOES configure one has to join it here first
@@ -111,9 +125,9 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   const { agent } = await agents.create({
     sessionId: SessionId(`session-${randomUUID()}`),
     meta: { cwd: process.cwd() },
-    agentOptions: { provider: selection.provider, model: selection.model },
+    agentOptions: { provider: effective.provider, model: effective.model },
     setup: (agentCtx) => {
-      const selected: ModelSelectionRef = { current: selection, assembled: undefined }
+      const selected: ModelSelectionRef = { current: effective, assembled: undefined }
       installModelSelection(agentCtx, selected)
     },
   })
@@ -146,5 +160,5 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('headless-runner: the launcher must provide ctx.appExit before the tree mounts')
   }
   const io: HeadlessIo = { stdout: internals.stdout, stderr: internals.stderr, exit }
-  void run(ctx, config.task, io).catch((error: unknown) => { fail(io, error) })
+  void run(ctx, config.task, config, io).catch((error: unknown) => { fail(io, error) })
 }

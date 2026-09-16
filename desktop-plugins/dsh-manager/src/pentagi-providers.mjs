@@ -181,11 +181,14 @@ function preferredId(env = process.env) {
 
 export function pickHarnessLlm(inspected, env = process.env) {
   const want = preferredId(env)
+  const healthy = inspected.filter(p => p.healthy)
   if (want && want !== 'auto') {
     const pinned = inspected.find(p => p.id === want)
-    if (pinned) return { ...pinned, reason: pinned.healthy ? 'pinned' : 'pinned-unhealthy' }
+    if (pinned?.healthy) return { ...pinned, reason: 'pinned' }
+    const fallback = healthy.find(p => p.isDefault) || healthy[0]
+    if (fallback) return { ...fallback, reason: 'pinned-unhealthy-fallback', pinned: want }
+    if (pinned) return { ...pinned, reason: 'pinned-unhealthy' }
   }
-  const healthy = inspected.filter(p => p.healthy)
   const def = healthy.find(p => p.isDefault) || healthy[0] || inspected.find(p => p.isDefault) || inspected[0]
   if (!def) return null
   return { ...def, reason: def.healthy ? (def.isDefault ? 'harness-default' : 'first-healthy') : 'none-healthy' }

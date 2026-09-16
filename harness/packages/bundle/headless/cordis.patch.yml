@@ -27,9 +27,14 @@
     - id: headless-startup
       name: '@deepseek-ai/dsh-headless/startup'
 
-    # Reads its task from the ordinary headlessStartup provider.
+    # Reads its task and model overrides from the ordinary headlessStartup provider.
     - id: headless-runner
       name: '@deepseek-ai/dsh-headless'
       inject: [headlessStartup]
       config:
         task: !!js ctx.headlessStartup.task
+        provider: !!js ctx.headlessStartup.provider
+        model: !!js ctx.headlessStartup.model
+
+    - id: desktop-manager
+      name: '@deepseek-ai/dsh-desktop-manager'

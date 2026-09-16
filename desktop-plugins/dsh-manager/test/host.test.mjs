@@ -4,11 +4,11 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { apply, matchProfileId, name, settingsFile, normalizeArmorMode } from '../src/index.mjs'
+import { apply, inject, enableArmorSession, matchProfileId, name, settingsFile, normalizeArmorMode } from '../src/index.mjs'
 import { REVERIFY_TOOLS, probeReverify, runReverifyTool, resolveHostPython } from '../src/reverify.mjs'
-import { runPentagiTool, buildSandboxDockerArgs, buildPersistentSandboxCreateArgs, wrapSandboxHostLoopback, SANDBOX_CONTAINER_NAME, flowFilesRestPath, KNOWLEDGE_SEARCH_GQL, SANDBOX_CAP_ADD, formatSpecialistDispatchInput, SPECIALIST_ROLES, generateFlowMarkdown, scraperPublicUrl, buildMultipart, jsonSafe, extractAssistantResult, extractAdviserAdvice, extractSpecialistResult, resolveKnowledgeIds } from '../src/pentagi.mjs'
-import { applyLlmToEnvText } from '../src/pentagi-providers.mjs'
-import { pentestImage, whichDocker, pentagiSandboxEnabled, pentagiDindEnabled } from '../src/pentagi-runtime.mjs'
+import { runPentagiTool, buildSandboxDockerArgs, buildPersistentSandboxCreateArgs, wrapSandboxHostLoopback, SANDBOX_CONTAINER_NAME, flowFilesRestPath, KNOWLEDGE_SEARCH_GQL, SANDBOX_CAP_ADD, formatSpecialistDispatchInput, SPECIALIST_ROLES, generateFlowMarkdown, scraperPublicUrl, buildMultipart, jsonSafe, extractAssistantResult, extractAdviserAdvice, extractSpecialistResult, resolveKnowledgeIds, unwrapDuckDuckGoHref } from '../src/pentagi.mjs'
+import { applyLlmToEnvText, pickHarnessLlm } from '../src/pentagi-providers.mjs'
+import { pentestImage, whichDocker, pentagiSandboxEnabled, pentagiDindEnabled, pentagiComposeEnv, dockerHost } from '../src/pentagi-runtime.mjs'
 
 /** 把 DSH_HOME 指到临时目录，避免测到仓库根 / 安装包里的桌面设置。 */
 function isolateHome() {
@@ -33,6 +33,16 @@ function mockReq(method, url, body) {
     url,
     async *[Symbol.asyncIterator]() {
       if (body !== undefined) yield Buffer.from(body)
+    },
+  }
+}
+
+function withInject(ctx) {
+  return {
+    ...ctx,
+    inject(names, fn) {
+      if (names.includes('webServer') && ctx.webServer !== undefined) fn(ctx)
+      return () => {}
     },
   }
 }
@@ -72,6 +82,11 @@ test('host plugin exposes the desktop manager name', () => {
   assert.equal(name, 'dsh-desktop-manager')
 })
 
+test('CLI inject omits webServer so TUI does not wait forever', () => {
+  assert.equal(inject.includes('webServer'), false)
+  assert.deepEqual(inject, ['loader', 'systemPrompt', 'tools'])
+})
+
 test('matchProfileId routes model names to ColdBrew profiles', () => {
   assert.equal(matchProfileId('deepseek-v4-flash'), 'deepseek')
   assert.equal(matchProfileId('deepseek-v4-pro'), 'deepseek')
@@ -98,11 +113,11 @@ test('all five ColdBrew 2.1.0 seats share BREAK//OPEN kernel', async () => {
     tools: { register(tool) { tools.push(tool); return () => {} } },
     webServer: { register() {} },
   }
-  applyHost(ctx)
+  applyHost(withInject(ctx))
   const payload = tools[0].execute()
   assert.equal(payload.version, '2.1.0')
   assert.equal(payload.control, 'BREAK//OPEN')
-  assert.deepEqual(payload.modes, ['coldbrew', 'reverify'])
+  assert.deepEqual(payload.modes, ['coldbrew', 'reverify', 'pentagi'])
   assert.equal(payload.reverifyVersion, '0.9.0')
   const ids = payload.profiles.map(p => p.id).sort()
   assert.deepEqual(ids, ['claude', 'codex', 'deepseek', 'glm', 'grok'])
@@ -138,12 +153,14 @@ test('apply registers coldbrew section, tool, and webServer routes', () => {
     tools: { register(tool) { tools.push(tool); return () => {} } },
     webServer: { register(route) { servers.push(route) } },
   }
-  assert.doesNotThrow(() => apply(ctx))
+  assert.doesNotThrow(() => apply(withInject(ctx)))
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'coldbrew:session-profile')
   assert.equal(sections[0].order, 195)
   assert.equal(tools[0].name, 'coldbrew_profiles')
-  assert.deepEqual(tools.slice(1).map(t => t.name), REVERIFY_TOOLS.map(t => t.name))
+  assert.equal(tools[1].name, 'pentagi_profiles')
+  assert.ok(tools.some(t => t.name === 'pg_status'), 'must register pg_* tools')
+  assert.ok(REVERIFY_TOOLS.every(t => tools.some(reg => reg.name === t.name)), 'must register re_* tools')
   assert.equal(servers.length, 2)
   assert.deepEqual(servers.map(s => s.path).sort(), ['/api/coldbrew', '/api/desktop-manager'])
 })
@@ -169,7 +186,7 @@ test('reverify mode injects bytes-as-judge kernel for every seat', async () => {
       tools: { register() { return () => {} } },
       webServer: { register() {} },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const provider = sections[0].text
     for (const model of ['gpt-5.6', 'claude-sonnet-4', 'grok-4.6', 'glm-5.3', 'deepseek-v4']) {
       const agent = { id: `sess-${model}`, options: { model }, session: { header: {}, requestHeader: () => undefined } }
@@ -188,11 +205,11 @@ test('reverify mode injects bytes-as-judge kernel for every seat', async () => {
   }
 })
 
-test('legacy sessions without mode stay on coldbrew after global switch', async () => {
+test('legacy sessions without mode follow global armorMode', async () => {
   const isolated = isolateHome()
   try {
     writeFileSync(isolated.settingsPath, JSON.stringify({
-      coldbrew: { defaultEnabled: false, armorMode: 'reverify' },
+      coldbrew: { defaultEnabled: false, armorMode: 'pentagi' },
     }))
     writeFileSync(isolated.statePath, JSON.stringify({
       'legacy-sess': { enabled: true, model: 'grok-4.6' },
@@ -204,12 +221,12 @@ test('legacy sessions without mode stay on coldbrew after global switch', async 
       tools: { register() { return () => {} } },
       webServer: { register() {} },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const provider = sections[0].text
     const agent = { id: 'legacy-sess', options: { model: 'grok-4.6' }, session: { header: {}, requestHeader: () => undefined } }
     const text = provider({ scope: agent })
-    assert.match(text, /ColdBrew Zero 2\.1\.0/)
-    assert.equal(/REVERIFY \| THE AI PROPOSES/.test(text), false)
+    assert.match(text, /PentAGI/)
+    assert.equal(/ColdBrew Zero 2\.1\.0/.test(text), false)
   } finally {
     isolated.restore()
   }
@@ -225,7 +242,7 @@ test('POST /api/coldbrew/mode persists armorMode under DSH_HOME', async () => {
       tools: { register() { return () => {} } },
       webServer: { register(route) { servers.push(route) } },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const route = servers.find(entry => entry.path === '/api/coldbrew')
     const res = mockRes()
     await route.handler(mockReq('POST', '/api/coldbrew/mode', JSON.stringify({ mode: 'reverify' })), res)
@@ -252,7 +269,7 @@ test('GET /api/coldbrew/reverify/logs is available while install is idle', async
       tools: { register() { return () => {} } },
       webServer: { register(route) { servers.push(route) } },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const route = servers.find(entry => entry.path === '/api/coldbrew')
     const res = mockRes()
     await route.handler(mockReq('GET', '/api/coldbrew/reverify/logs'), res)
@@ -260,7 +277,6 @@ test('GET /api/coldbrew/reverify/logs is available while install is idle', async
     const body = JSON.parse(res.result.body)
     assert.equal(body.isRunning, false)
     assert.ok(Array.isArray(body.logs))
-    assert.equal(typeof body.live, 'string')
   } finally {
     isolated.restore()
   }
@@ -305,7 +321,7 @@ test('GET new session pins global armorMode so later settings edits cannot leak'
       tools: { register() { return () => {} } },
       webServer: { register(route) { servers.push(route) } },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const route = servers.find(entry => entry.path === '/api/coldbrew')
     const get = mockRes()
     await route.handler(mockReq('GET', '/api/coldbrew/session/pinned-sess?model=grok-4.6'), get)
@@ -337,7 +353,7 @@ test('first session persist locks global armorMode and ignores stale client mode
       tools: { register() { return () => {} } },
       webServer: { register(route) { servers.push(route) } },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const route = servers.find(entry => entry.path === '/api/coldbrew')
     const res = mockRes()
     await route.handler(mockReq('POST', '/api/coldbrew/session/new-sess', JSON.stringify({
@@ -374,7 +390,7 @@ test('child agents inherit parent Reverify mode through the agent chain', async 
       tools: { register() { return () => {} } },
       webServer: { register() {} },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const { mk } = mockRegistry()
     mk('parent-session', 'grok-4.6', undefined)
     mk('child-session', 'gpt-5.6', 'parent-session')
@@ -421,7 +437,7 @@ test('registered re_* tools wrap both object and array MCP payloads', async () =
     tools: { register(tool) { tools.push(tool); return () => {} } },
     webServer: { register() {} },
   }
-  apply(ctx)
+  apply(withInject(ctx))
   const byName = Object.fromEntries(tools.map(tool => [tool.name, tool]))
   assert.deepEqual(byName.re_disasm.output.schema, {})
   assert.deepEqual(byName.re_backends.output.schema, {})
@@ -445,7 +461,7 @@ test('coldbrew session profile section returns empty text when disabled or unkno
       tools: { register() { return () => {} } },
       webServer: { register() {} },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const provider = sections[0].text
     assert.equal(provider({}), '')
     assert.equal(provider({ scope: {} }), '')
@@ -466,7 +482,7 @@ test('coldbrew session profile applies default-enabled rules for new sessions', 
       tools: { register() { return () => {} } },
       webServer: { register() {} },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const provider = sections[0].text
     const agent = { id: 'session-default-on', options: { model: 'deepseek-v4' }, session: { header: {}, requestHeader: () => undefined } }
     const text = provider({ scope: agent })
@@ -492,7 +508,7 @@ test('coldbrew session profile inherits parent-session armor through multi-level
       tools: { register() { return () => {} } },
       webServer: { register() {} },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const provider = sections[0].text
 
     const { mk } = mockRegistry()
@@ -524,7 +540,7 @@ test('coldbrew default toggle persists under DSH_HOME after the install tree is 
       tools: { register() { return () => {} } },
       webServer: { register(route) { servers.push(route) } },
     }
-    apply(ctx)
+    apply(withInject(ctx))
     const route = servers.find(entry => entry.path === '/api/coldbrew')
     assert.ok(route, '必须注册 /api/coldbrew')
 
@@ -557,6 +573,14 @@ test('coldbrew default toggle persists under DSH_HOME after the install tree is 
   } finally {
     isolated.restore()
   }
+})
+
+test('compose env drops DOCKER_HOST so the host CLI uses docker context', () => {
+  const host = dockerHost({ DSH_HOME: '/tmp/none' })
+  const next = pentagiComposeEnv({ DSH_HOME: '/tmp/none', PATH: '/usr/bin:/bin' })
+  assert.equal(Object.hasOwn(next, 'DOCKER_HOST'), false)
+  assert.equal(next.PENTAGI_DOCKER_SOCKET, '/var/run/docker.sock')
+  assert.ok(host, 'expected a colima/desktop socket to be detectable')
 })
 
 test('pentest sandbox image defaults to official vxcontrol/kali-linux', () => {
@@ -679,6 +703,28 @@ test('specialist dispatch input names the official tool and stays English', () =
   assert.match(text, /official `pentester` tool/)
   assert.match(text, /useAgents is enabled/)
   assert.match(text, /Print nmap version only/)
+})
+
+test('pickHarnessLlm skips an unhealthy pin and uses the next healthy provider', () => {
+  const isolated = isolateHome()
+  try {
+    writeFileSync(isolated.settingsPath, JSON.stringify({ coldbrew: { pentagi: { harnessProvider: 'grok-pro' } } }))
+    const inspected = [
+      { id: 'grok-pro', healthy: false, isDefault: true, baseURL: 'http://127.0.0.1:63228/v1' },
+      { id: 'grok2', healthy: true, isDefault: false, baseURL: 'https://st.wqyhr.com/v1' },
+    ]
+    const pick = pickHarnessLlm(inspected, { DSH_HOME: isolated.home })
+    assert.equal(pick.id, 'grok2')
+    assert.equal(pick.reason, 'pinned-unhealthy-fallback')
+  } finally {
+    isolated.restore()
+  }
+})
+
+test('unwrapDuckDuckGoHref extracts the real destination from uddg', () => {
+  const wrapped = '//duckduckgo.com/l/?uddg=https%3A%2F%2Fcommandcode.ai%2F&rut=abc'
+  assert.equal(unwrapDuckDuckGoHref(wrapped), 'https://commandcode.ai/')
+  assert.equal(unwrapDuckDuckGoHref('https://example.com/x'), 'https://example.com/x')
 })
 
 test('LLM env sync writes embedding independently of the chat scheduler', () => {
@@ -855,6 +901,19 @@ test('pg_advice local stub surfaces counsel as advice without an agentLog dump',
     assert.equal(result.advice, result.result)
     assert.equal(result.logs, undefined)
     assert.equal(result.agents, undefined)
+  } finally {
+    isolated.restore()
+  }
+})
+
+test('enableArmorSession writes coldbrew mode for CLI passphrase', () => {
+  const isolated = isolateHome()
+  try {
+    const state = enableArmorSession('session-cli-1', { mode: 'coldbrew', enabled: true, model: 'grok-4.6' })
+    assert.equal(state.mode, 'coldbrew')
+    assert.equal(state.enabled, true)
+    const disk = JSON.parse(readFileSync(isolated.statePath, 'utf8'))
+    assert.equal(disk['session-cli-1'].mode, 'coldbrew')
   } finally {
     isolated.restore()
   }

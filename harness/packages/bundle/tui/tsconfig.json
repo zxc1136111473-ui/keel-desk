@@ -37,6 +37,12 @@
     },
     {
       "path": "../../boot/app-boot"
+    },
+    {
+      "path": "../../settings/settings"
+    },
+    {
+      "path": "../../skill/skill"
     }
   ]
 }

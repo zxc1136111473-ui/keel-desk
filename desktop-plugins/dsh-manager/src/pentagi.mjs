@@ -366,14 +366,18 @@ function currentFlowId(args, env = process.env) {
 }
 
 async function defaultProviderName(env = process.env) {
+  let pinned = 'auto'
   try {
     const settings = JSON.parse(readFileSync(join(userHome(env), 'desktop-settings.json'), 'utf8'))
-    const pinned = String(settings?.coldbrew?.pentagi?.harnessProvider || 'auto')
-    if (pinned && pinned !== 'auto') return `dsh-${pinned}`
+    pinned = String(settings?.coldbrew?.pentagi?.harnessProvider || 'auto')
   } catch { /* */ }
   const listed = await graphql('query { providers { name type } }', {}, env)
   const names = listed.json?.data?.providers?.map(p => p.name).filter(Boolean) ?? []
-  const dsh = names.find(n => String(n).startsWith('dsh-'))
+  if (pinned && pinned !== 'auto') {
+    const want = `dsh-${pinned}`
+    if (names.includes(want)) return want
+  }
+  const dsh = names.find(n => String(n).startsWith('dsh-') && n !== 'dsh-grok-pro') || names.find(n => String(n).startsWith('dsh-'))
   if (dsh) return dsh
   if (names.includes('custom')) return 'custom'
   if (names.includes('deepseek')) return 'deepseek'
@@ -1162,6 +1166,16 @@ function searchBucket(bucket, questions, extraFilter) {
     .map(row => row.item)
 }
 
+export function unwrapDuckDuckGoHref(href) {
+  try {
+    const absolute = href.startsWith('//') ? `https:${href}` : href
+    const u = new URL(absolute, 'https://duckduckgo.com')
+    const uddg = u.searchParams.get('uddg')
+    if (uddg) return uddg
+  } catch { /* keep original */ }
+  return href
+}
+
 async function duckduckgo(query, maxResults = 5) {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
   const page = await httpGet(url)
@@ -1170,15 +1184,16 @@ async function duckduckgo(query, maxResults = 5) {
   const re = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
   let match
   while ((match = re.exec(page.text)) !== null && results.length < maxResults) {
-    results.push({ href: match[1], title: htmlToText(match[2]) })
+    results.push({ href: unwrapDuckDuckGoHref(match[1]), title: htmlToText(match[2]) })
   }
   if (results.length === 0) {
     for (const link of extractLinks(page.text, url)) {
       if (results.length >= maxResults) break
-      if (!link.href.includes('duckduckgo.com')) results.push(link)
+      if (!link.href.includes('duckduckgo.com')) results.push({ href: unwrapDuckDuckGoHref(link.href), title: link.title || link.href })
     }
   }
-  return { ok: true, engine: 'duckduckgo', query, results, snippet: htmlToText(page.text).slice(0, 1500) }
+  const snippet = results.map(item => `${item.title} ${item.href}`).join('\n').slice(0, 1500)
+  return { ok: true, engine: 'duckduckgo', query, results, snippet }
 }
 
 async function sploitus(query, maxResults = 10, exploitType = 'exploits') {
@@ -2029,8 +2044,9 @@ async function executePentagiTool(name, args = {}, env = process.env) {
       if (tav?.ok) return { ...tav, mode: a.mode ?? 'answer' }
       const web = await duckduckgo(String(a.query ?? ''), Number(a.max_results) || 5)
       if (a.mode === 'links') return web
-      if (web.results?.[0]?.href) {
-        const page = await httpGet(web.results[0].href)
+      const topHref = web.results?.[0]?.href
+      if (topHref && !/duckduckgo\.com/i.test(topHref)) {
+        const page = await httpGet(topHref)
         return { ...web, mode: a.mode ?? 'answer', top: { url: page.url, text: htmlToText(page.text).slice(0, 12_000) } }
       }
       return { ...web, mode: a.mode ?? 'answer' }
@@ -2274,20 +2290,20 @@ async function executePentagiTool(name, args = {}, env = process.env) {
     }
     case 'pg_flow_input': {
       const flows = flowStore(env)
-      const flowId = a.flowId || flows.current
+      const flowId = currentFlowId(a, env)
       const remote = flowId
         ? await graphql('mutation Put($flowId: ID!, $input: String!) { putUserInput(flowId: $flowId, input: $input) }', { flowId, input: a.input }, env)
-        : { ok: false, error: 'no flowId' }
+        : { ok: false, error: 'no remote flowId' }
       flows.notes = [...(flows.notes ?? []), { at: new Date().toISOString(), kind: 'input', input: a.input }].slice(-50)
       saveFlows(flows, env)
       return { ok: true, flowId, remote }
     }
     case 'pg_flow_stop': {
       const flows = flowStore(env)
-      const flowId = a.flowId || flows.current
+      const flowId = currentFlowId(a, env)
       const remote = flowId
         ? await graphql('mutation Stop($flowId: ID!) { stopFlow(flowId: $flowId) }', { flowId }, env)
-        : { ok: false, error: 'no flowId' }
+        : { ok: false, error: 'no remote flowId' }
       const current = (flows.flows ?? []).find(item => item.id === flowId)
       if (current) current.status = 'stopped'
       saveFlows(flows, env)
@@ -2298,7 +2314,7 @@ async function executePentagiTool(name, args = {}, env = process.env) {
       const flowId = currentFlowId(a, env)
       const remote = flowId
         ? await graphql('mutation Finish($flowId: ID!) { finishFlow(flowId: $flowId) }', { flowId }, env)
-        : { ok: false, error: 'no flowId' }
+        : { ok: false, error: 'no remote flowId' }
       const current = (flows.flows ?? []).find(item => item.id === flowId)
       if (current) current.status = 'finished'
       saveFlows(flows, env)
@@ -2309,7 +2325,7 @@ async function executePentagiTool(name, args = {}, env = process.env) {
       const flowId = currentFlowId(a, env)
       const remote = flowId
         ? await graphql('mutation Rename($flowId: ID!, $title: String!) { renameFlow(flowId: $flowId, title: $title) }', { flowId, title: a.title }, env)
-        : { ok: false, error: 'no flowId' }
+        : { ok: false, error: 'no remote flowId' }
       const current = (flows.flows ?? []).find(item => item.id === flowId)
       if (current) current.title = a.title
       saveFlows(flows, env)

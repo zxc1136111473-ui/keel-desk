@@ -74,7 +74,27 @@
 .dsm-actions {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.dsm-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.dsm-action-group + .dsm-action-group {
+  padding-left: 12px;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+}
+
+@media (max-width: 560px) {
+  .dsm-action-group + .dsm-action-group {
+    padding-left: 0;
+    border-left: 0;
+  }
 }
 
 .dsm-logs {
@@ -83,6 +103,58 @@
   flex: 1;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 安装/启动进度条：百分比 + 步骤 + 预计耗时。 */
+.dsm-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.dsm-progress-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+.dsm-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--dsw-alias-accent, var(--dsw-alias-label-primary));
+  transition: width 0.4s ease;
+}
+
+.dsm-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.dsm-progress-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsm-progress-pct {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsm-progress-eta {
+  white-space: nowrap;
 }
 
 .dsm-logs-head {

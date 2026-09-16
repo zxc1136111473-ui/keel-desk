@@ -127,7 +127,7 @@ function run(command, args, options = {}) {
     let settled = false
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: spawnEnv(options.env ?? process.env),
+      env: options.rawEnv ? options.env : spawnEnv(options.env ?? process.env),
       shell: false,
     })
     const timer = setTimeout(() => {
@@ -165,7 +165,6 @@ function pentagiRoot(env = process.env) {
     env.DSH_PENTAGI_ROOT,
     join(userHome(env), 'pentagi-src'),
     resolve(process.cwd(), 'vendor/pentagi'),
-    '/Users/admin/pro-v4/vendor/pentagi',
     resolve(here, '../../../../vendor/pentagi'),
   ].filter(Boolean)
   for (const dir of candidates) {
@@ -321,10 +320,13 @@ export function writePentagiEnvText(text, env = process.env) {
 
 function composeEnv(env = process.env) {
   const next = spawnEnv(env)
-  // Host CLI still talks to colima via docker context; the *container*
-  // must see the in-VM socket. Compose interpolates DOCKER_HOST into the
-  // pentagi service — never leak the macOS path.
-  next.DOCKER_HOST = 'unix:///var/run/docker.sock'
+  // Host CLI must reach the daemon via docker context (colima), NOT a hardcoded
+  // DOCKER_HOST: /var/run/docker.sock on macOS is a broken Docker Desktop
+  // symlink, and compose interpolates DOCKER_HOST into the pentagi service
+  // where it must stay unix:///var/run/docker.sock (the VM socket bind-mounted
+  // inside the container). Drop it so the CLI uses context and .env drives the
+  // container value.
+  delete next.DOCKER_HOST
   next.PENTAGI_DOCKER_SOCKET = '/var/run/docker.sock'
   return next
 }
@@ -951,11 +953,23 @@ function pythonBin(env = process.env) {
   return which('python3', env)
 }
 
+function embedderVenvDir(env = process.env) {
+  return join(userHome(env), 'pentagi', 'embedder-venv')
+}
+
+function embedderVenvPython(env = process.env) {
+  const venv = embedderVenvDir(env)
+  return process.platform === 'win32'
+    ? join(venv, 'Scripts', 'python.exe')
+    : join(venv, 'bin', 'python')
+}
+
 let fastembedCache = { at: 0, value: null }
 
 export async function probeFastembedInstalled(env = process.env, { fresh = false } = {}) {
   if (!fresh && fastembedCache.value && Date.now() - fastembedCache.at < 30_000) return fastembedCache.value
-  const py = pythonBin(env)
+  const venvPy = embedderVenvPython(env)
+  const py = existsSync(venvPy) ? venvPy : pythonBin(env)
   const probe = await run(py, ['-c', 'import fastembed'], { timeoutMs: 8_000, env })
   const value = { ok: probe.ok, python: py, error: probe.ok ? undefined : (probe.stderr || probe.stdout || 'fastembed not installed') }
   fastembedCache = { at: Date.now(), value }
@@ -965,15 +979,25 @@ export async function probeFastembedInstalled(env = process.env, { fresh = false
 async function ensureFastembed(onLog, env = process.env) {
   const already = await probeFastembedInstalled(env)
   if (already.ok) return { ok: true, installed: false, python: already.python }
-  const py = already.python
-  onLog('本机尚未安装 fastembed，正在 pip install（第一次大约几十秒到几分钟）…')
-  const pip = await run(py, ['-m', 'pip', 'install', '--user', '--upgrade', 'fastembed'], { timeoutMs: 10 * 60_000, env, onLog })
+  const systemPy = pythonBin(env)
+  const venvDir = embedderVenvDir(env)
+  const venvPy = embedderVenvPython(env)
+  mkdirSync(join(userHome(env), 'pentagi'), { recursive: true })
+  if (!existsSync(venvPy)) {
+    onLog(`Homebrew/系统 Python 不允许直接 pip。正在 ${venvDir} 创建独立环境…`)
+    const venv = await run(systemPy, ['-m', 'venv', venvDir], { timeoutMs: 120_000, env, onLog })
+    if (!venv.ok || !existsSync(venvPy)) {
+      return { ok: false, python: systemPy, error: venv.stderr || venv.stdout || `failed to create venv at ${venvDir}` }
+    }
+  }
+  onLog('本机尚未安装 fastembed，正在 venv 里 pip install（第一次大约几十秒到几分钟）…')
+  const pip = await run(venvPy, ['-m', 'pip', 'install', '--upgrade', 'fastembed'], { timeoutMs: 10 * 60_000, env, onLog })
   if (!pip.ok) {
-    return { ok: false, python: py, error: pip.stderr || pip.stdout || 'pip install fastembed failed' }
+    return { ok: false, python: venvPy, error: pip.stderr || pip.stdout || 'pip install fastembed failed' }
   }
   const again = await probeFastembedInstalled(env, { fresh: true })
-  if (!again.ok) return { ok: false, python: py, error: 'fastembed import still failing after pip install' }
-  return { ok: true, installed: true, python: py }
+  if (!again.ok) return { ok: false, python: venvPy, error: 'fastembed import still failing after pip install' }
+  return { ok: true, installed: true, python: again.python }
 }
 
 function embedderLogPath(env = process.env) {
@@ -1117,7 +1141,7 @@ export async function startPentagiRuntime(onLog = () => {}, env = process.env) {
   let up = { ok: false, stderr: '', stdout: '' }
   for (let attempt = 1; attempt <= 4; attempt++) {
     onLog(`$ docker compose up -d  (${root})  attempt ${attempt}/4`)
-    up = await run(dockerReady.docker, ['compose', 'up', '-d'], { cwd: root, timeoutMs: 15 * 60_000, env: composeEnv(env), onLog })
+    up = await run(dockerReady.docker, ['compose', 'up', '-d'], { cwd: root, timeoutMs: 15 * 60_000, env: composeEnv(env), rawEnv: true, onLog })
     if (up.ok) break
     onLog(`compose 失败，20s 后重试：${(up.stderr || up.stdout || '').split('\n').pop()}`)
     await new Promise(r => setTimeout(r, 20_000))
@@ -1153,7 +1177,7 @@ export async function stopPentagiRuntime(onLog = () => {}, env = process.env) {
   const root = pentagiRoot(env)
   if (!existsSync(join(root, 'docker-compose.yml'))) throw new Error(`pentagi root missing: ${root}`)
   onLog(`$ docker compose down  (${root})`)
-  const down = await run(docker, ['compose', 'down'], { cwd: root, timeoutMs: 180_000, env: composeEnv(env), onLog })
+  const down = await run(docker, ['compose', 'down'], { cwd: root, timeoutMs: 180_000, env: composeEnv(env), rawEnv: true, onLog })
   if (!down.ok) throw new Error(down.stderr || 'docker compose down failed')
   return probePentagiRuntime(env)
 }
@@ -1164,7 +1188,9 @@ export {
   DEFAULT_PORT as PENTAGI_DEFAULT_PORT,
   DEFAULT_PENTEST_IMAGE,
   LOCAL_EMBED_MODEL,
+  composeEnv as pentagiComposeEnv,
   dockerHost,
+  pentagiRoot,
   spawnEnv,
   which as whichDocker,
 }

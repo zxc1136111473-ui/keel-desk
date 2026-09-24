@@ -34,6 +34,21 @@ var client_default = "/* \u684C\u9762\u7BA1\u7406\u9875\u6837\u5F0F\u3002\n   \u
 
 // desktop-plugins/dsh-manager/src/client.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
+var TERMINAL_LABELS = {
+  signal: (signal) => `\u4FE1\u53F7 ${signal}`,
+  exitCode: (exitCode) => `\u9000\u51FA ${exitCode}`,
+  running: "\u8FD0\u884C\u4E2D",
+  failed: "\u5931\u8D25",
+  done: "\u5B8C\u6210",
+  copy: "\u590D\u5236",
+  copied: "\u5DF2\u590D\u5236",
+  noOutput: "\u6682\u65E0\u8F93\u51FA",
+  collapseAria: "\u6536\u8D77\u65E5\u5FD7",
+  collapse: "\u6536\u8D77",
+  expandAria: (hidden) => `\u5C55\u5F00\u5176\u4F59 ${hidden} \u884C`,
+  expand: (hidden) => `\u5C55\u5F00 ${hidden} \u884C`
+};
+var inject = ["slots", "locale"];
 var NS = "desktop-manager";
 var STYLE_MARKER = "data-dsh-desktop-manager-styles";
 function installStyles() {
@@ -60,14 +75,13 @@ function writeClipboard(text) {
   }
 }
 var name = "dsh-desktop-manager";
-var inject = ["slots", "locale", "connection", "modelDirectories"];
 function matchProfileId(modelName) {
   const name2 = String(modelName ?? "").toLowerCase();
   const rules = {
-    codex: ["gpt", "codex", "o1", "o3"],
-    claude: ["claude"],
-    grok: ["grok"],
+    grok: ["grok", "xai"],
+    claude: ["claude", "anthropic", "sonnet", "opus", "haiku"],
     glm: ["glm", "chatglm", "zhipu"],
+    codex: ["gpt", "codex", "o1", "o3", "openai"],
     deepseek: ["deepseek"]
   };
   for (const [id, patterns] of Object.entries(rules)) {
@@ -75,6 +89,30 @@ function matchProfileId(modelName) {
   }
   return "deepseek";
 }
+function sessionIdOf(zone) {
+  if (typeof zone === "string") return zone;
+  if (!zone || typeof zone !== "object") return "";
+  const record = zone;
+  return record.session?.sessionId || record.sessionId || "";
+}
+function selectionLabel(current, groups) {
+  const model = String(current?.model ?? "").trim();
+  const provider = String(current?.provider ?? "").trim();
+  if (groups) {
+    const group = groups.find((item) => item.id === provider);
+    const named = group?.models?.find((item) => item.id === model)?.name;
+    if (named) return `${named} ${model} ${provider} ${group?.name ?? ""}`;
+  }
+  return `${model} ${provider}`;
+}
+var EMPTY_DIRECTORY_SNAPSHOT = {
+  current: null,
+  groups: [],
+  status: "idle"
+};
+var noopSubscribe = () => () => {
+};
+var emptyDirectorySnapshot = () => EMPTY_DIRECTORY_SNAPSHOT;
 var PROFILE_LABELS = {
   codex: "GPT-5.6/Codex",
   claude: "Claude",
@@ -106,32 +144,43 @@ function wakePhraseFor(profileId, mode) {
 function modeLabel(mode) {
   return mode === "reverify" ? "Reverify" : mode === "pentagi" ? "PentAGI" : "\u51B7\u5496\u5561";
 }
-function ColdBrewToggle({ sessionId, session, directory, input, inputActions }) {
+function ColdBrewToggle({ sessionId, session, useSession, directory, loadDirectory, input, inputActions }) {
   const [enabled, setEnabled] = (0, import_react.useState)(null);
-  const [mode, setMode] = (0, import_react.useState)("coldbrew");
+  const [mode, setMode] = (0, import_react.useState)("pentagi");
   const [busy, setBusy] = (0, import_react.useState)(false);
   const [error, setError] = (0, import_react.useState)(null);
   const [copied, setCopied] = (0, import_react.useState)(false);
   const [notice, setNotice] = (0, import_react.useState)(null);
   const copiedTimer = (0, import_react.useRef)(null);
-  const newSession = session?.blank === true;
-  const model = directory?.getSnapshot()?.current?.model ?? "";
+  const sessionSnap = typeof useSession === "function" ? useSession() : session;
+  const newSession = sessionSnap == null || sessionSnap.blank !== false;
+  const snapshot = (0, import_react.useSyncExternalStore)(
+    directory?.subscribe ?? noopSubscribe,
+    directory?.getSnapshot ?? emptyDirectorySnapshot
+  );
+  (0, import_react.useEffect)(() => {
+    loadDirectory?.();
+    const timer = setInterval(() => loadDirectory?.(), snapshot?.current?.model ? 4e3 : 400);
+    return () => clearInterval(timer);
+  }, [loadDirectory, sessionId, snapshot?.current?.model]);
+  const current = snapshot?.current ?? null;
+  const model = selectionLabel(current, snapshot?.groups);
   const profileId = matchProfileId(model);
-  const profileLabel = PROFILE_LABELS[profileId] ?? profileId;
+  const profileLabel = current?.model || current?.provider ? PROFILE_LABELS[profileId] ?? profileId : "";
   const wakePhrase = wakePhraseFor(profileId, mode);
   (0, import_react.useEffect)(() => {
     let alive = true;
     const pull = () => {
       const params = new URLSearchParams();
-      if (model) params.set("model", model);
+      if (current?.model) params.set("model", current.model);
+      if (current?.provider) params.set("provider", current.provider);
       if (newSession) params.set("blank", "1");
       const query = params.toString() ? `?${params}` : "";
       fetch(`/api/coldbrew/session/${encodeURIComponent(sessionId)}${query}`).then((res) => res.json()).then((data) => {
         if (!alive) return;
         setEnabled(data.enabled === true);
-        setMode(data.mode === "reverify" || data.mode === "pentagi" ? data.mode : "coldbrew");
+        if (data.mode === "reverify" || data.mode === "pentagi" || data.mode === "coldbrew") setMode(data.mode);
       }).catch(() => {
-        if (alive) setEnabled(false);
       });
     };
     pull();
@@ -143,7 +192,7 @@ function ColdBrewToggle({ sessionId, session, directory, input, inputActions }) 
       alive = false;
       clearInterval(timer);
     };
-  }, [sessionId, model, newSession]);
+  }, [sessionId, current?.model, current?.provider, newSession]);
   const toggle = async (next) => {
     if (!newSession || busy) return;
     setBusy(true);
@@ -152,7 +201,7 @@ function ColdBrewToggle({ sessionId, session, directory, input, inputActions }) 
       const res = await fetch(`/api/coldbrew/session/${encodeURIComponent(sessionId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next, model })
+        body: JSON.stringify({ enabled: next, model, mode })
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
@@ -174,8 +223,8 @@ function ColdBrewToggle({ sessionId, session, directory, input, inputActions }) 
     }, 1800);
   };
   const fillComposer = (0, import_react.useCallback)(() => {
-    const current = String(input?.draft ?? "");
-    if (current.trim() !== "") return;
+    const current2 = String(input?.draft ?? "");
+    if (current2.trim() !== "") return;
     try {
       inputActions?.setDraft(wakePhrase);
     } catch {
@@ -252,7 +301,7 @@ function ColdBrewToggle({ sessionId, session, directory, input, inputActions }) 
           ]
         }
       ),
-      on && ` \xB7 ${profileLabel}`
+      on && profileLabel ? ` \xB7 ${profileLabel}` : ""
     ] }),
     error !== null && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsm-toggle-error", title: error, children: "!" })
   ] });
@@ -1003,7 +1052,8 @@ function PentagiSection() {
           className: "dsm-terminal",
           command: "PentAGI \u540E\u7AEF",
           output: logs.length > 0 ? logs.join("\n") : "\u7B49\u5F85\u4EFB\u52A1\u5F00\u59CB\u2026",
-          running: busy
+          running: busy,
+          labels: TERMINAL_LABELS
         }
       )
     ] })
@@ -1154,25 +1204,37 @@ function ManagerSection() {
   const action = async (type) => {
     console.log(`[dsh-desktop-manager] Action: ${type}`);
     if (type === "restart") {
+      const desktop = window.dshDesktop;
+      if (typeof desktop?.restartHarness === "function") {
+        await desktop.restartHarness();
+        return;
+      }
       window.parent.postMessage({ type: "deepseek-harness:restart" }, "*");
       return;
     }
     setBusy(true);
     setLogs([]);
+    startPolling();
     try {
       const res = await fetch(`/api/desktop-manager/${type}`, { method: "POST" });
-      if (!res.ok) {
-        throw new Error(await res.text());
+      const bodyText = await res.text();
+      let payload = {};
+      try {
+        payload = JSON.parse(bodyText);
+      } catch {
+        payload = { error: bodyText };
       }
-      if (type === "install" || type === "uninstall") {
-        startPolling();
-      } else {
-        showToast("\u8BBE\u7F6E\u5DF2\u66F4\u65B0\uFF0C\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u5E94\u7528");
-        await refresh();
-        setBusy(false);
-      }
+      if (Array.isArray(payload.logs) && payload.logs.length > 0) setLogs(payload.logs);
+      if (!res.ok) throw new Error(payload.error || bodyText || `HTTP ${res.status}`);
+      showToast(type === "install" ? "\u51B7\u5496\u5561 Zero \u5DF2\u5C31\u7EEA" : type === "uninstall" ? "\u5DF2\u505C\u7528\u51B7\u5496\u5561 Zero" : "\u8BBE\u7F6E\u5DF2\u66F4\u65B0");
+      await refresh();
     } catch (error) {
       showToast(`\u64CD\u4F5C\u5931\u8D25: ${error.message}`);
+    } finally {
+      if (pollTimer.current) {
+        clearInterval(pollTimer.current);
+        pollTimer.current = null;
+      }
       setBusy(false);
     }
   };
@@ -1350,7 +1412,8 @@ function ManagerSection() {
           className: "dsm-terminal",
           command: "\u684C\u9762\u7BA1\u7406\u4EFB\u52A1",
           output: logs.length > 0 ? logs.join("\n") : "\u7B49\u5F85\u4EFB\u52A1\u5F00\u59CB\u2026",
-          running: busy
+          running: busy,
+          labels: TERMINAL_LABELS
         }
       )
     ] })
@@ -1368,30 +1431,47 @@ function apply(ctx) {
     id: "desktop-manager",
     order: 100,
     label: () => t("nav"),
-    locale: NS
+    locale: NS,
+    inject: () => ({})
   }, ManagerSection));
   ctx.slots.inject("settings.section", () => ctx.slots.register({
     name: "settings.section",
     id: "pentagi",
     order: 110,
     label: () => t("pentagiNav"),
-    locale: NS
-  }, PentagiSection));
-  ctx.slots.inject("conversation.input.left", () => ctx.slots.register({
-    name: "conversation.input.left",
-    id: "coldbrew-toggle",
-    order: 10,
     locale: NS,
-    inject: (sessionId) => {
-      try {
-        const directory = ctx.modelDirectories?.directoryFor(sessionId);
-        if (directory === void 0) return { directory: null };
-        return { directory: directory.store };
-      } catch {
-        return { directory: null };
+    inject: () => ({})
+  }, PentagiSection));
+  const registerToggle = (scope) => {
+    const modelDirectories = typeof scope.get === "function" ? scope.get("modelDirectories") : void 0;
+    scope.slots.inject("conversation.input.left", () => scope.slots.register({
+      name: "conversation.input.left",
+      id: "coldbrew-toggle",
+      order: 10,
+      locale: NS,
+      inject: (sessionId) => {
+        const id = sessionIdOf(sessionId);
+        try {
+          if (!id) return { directory: null, loadDirectory: () => {
+          } };
+          const directory = modelDirectories?.directoryFor(id);
+          if (directory === void 0) return { directory: null, loadDirectory: () => {
+          } };
+          const loadDirectory = () => {
+            directory.load?.().catch(() => {
+            });
+          };
+          loadDirectory();
+          return { directory: directory.store, loadDirectory };
+        } catch {
+          return { directory: null, loadDirectory: () => {
+          } };
+        }
       }
-    }
-  }, ColdBrewToggle));
+    }, ColdBrewToggle));
+  };
+  if (typeof ctx.inject === "function") ctx.inject(["modelDirectories"], registerToggle);
+  else registerToggle(ctx);
 }
 return module.exports; } });
 //# sourceMappingURL=client.js.map

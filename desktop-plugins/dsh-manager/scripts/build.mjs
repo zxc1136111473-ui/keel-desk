@@ -33,6 +33,9 @@ await copyFile(join(pluginRoot, 'src', 'reverify-bridge.py'), join(outDir, 'reve
 await copyFile(join(pluginRoot, 'src', 'pentagi.mjs'), join(outDir, 'pentagi.mjs'))
 await copyFile(join(pluginRoot, 'src', 'pentagi-runtime.mjs'), join(outDir, 'pentagi-runtime.mjs'))
 await copyFile(join(pluginRoot, 'src', 'pentagi-providers.mjs'), join(outDir, 'pentagi-providers.mjs'))
+// pentagi-runtime/pentagi-providers import it; omitting the copy breaks the
+// whole Host plugin with ERR_MODULE_NOT_FOUND on load.
+await copyFile(join(pluginRoot, 'src', 'harness-credentials.mjs'), join(outDir, 'harness-credentials.mjs'))
 await copyFile(join(pluginRoot, 'src', 'embedder-server.py'), join(outDir, 'embedder-server.py'))
 // 冷咖啡五个 profile 提示词是 host 端运行时资源（lib/index.mjs 相对路径读取）。
 await cp(join(pluginRoot, 'src', 'profiles'), join(outDir, 'profiles'), { recursive: true })

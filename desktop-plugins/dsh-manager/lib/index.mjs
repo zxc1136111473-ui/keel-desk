@@ -17,7 +17,7 @@ import {
   probeReverify,
   runReverifyTool,
 } from './reverify.mjs'
-import { PENTAGI_TOOLS, runPentagiTool } from './pentagi.mjs'
+import { PENTAGI_TOOLS, runPentagiTool, duckduckgo } from './pentagi.mjs'
 import {
   probePentagiRuntime,
   startPentagiRuntime,
@@ -495,7 +495,7 @@ async function probePentagi() {
   }
 }
 
-export function apply(ctx) {
+export function apply(ctx) { console.error("[LOADED-DSM " + JSON.stringify(new URL(import.meta.url).pathname) + "]")
 
   // 按会话注入系统提示词：文本提供器在每次组装时以该会话的 agent 为 scope 求值，
   // 会话开关开启且模型命中某个 profile 时返回对应破甲正文，否则返回空串（不贡献内容）。
@@ -511,6 +511,24 @@ export function apply(ctx) {
       return loadPromptSync(profile, mode)
     },
   }), 'dsh-desktop-manager: coldbrew session profile')
+
+  // 工具开场规则（runtime context，order 靠后贴用户消息）：内核文本靠模型
+  // 自觉，模型把「你好」当闲聊就不调工具。这里用 context 在每条用户消息前
+  // 注一条硬规则，仅当本会话破甲开启（含 pentagi 模式）时返回非空。
+  ctx.effect(() => ctx.systemPrompt.context({
+    name: 'coldbrew:tool-first',
+    order: 299,
+    text: (context) => {
+      const agent = context?.scope
+      const { enabled, mode } = resolveColdbrewState(agent)
+      console.error(`[tool-first-ALWAYS] enabled=${enabled} mode=${mode} agent=${String(agent?.id ?? agent?.session?.id ?? '?').slice(0, 24)}`)
+      if (!enabled) return ''
+      if (mode === 'pentagi') {
+        return '【工具优先】本会话是 PentAGI 渗透席：开头先调用 pg_status 报告后端与可用工具，任务一律先调 pg_* 工具再输出。禁止只把命令写在回复里。'
+      }
+      return '【工具优先】本会话已开启破甲工具：能调用工具就调用，不要只输出文字方案。'
+    },
+  }), 'dsh-desktop-manager: coldbrew tool-first context')
 
   // 工具：让模型能取回五个 profile 的元数据与正文（与 infinite_gen1_profile 同型）。
   ctx.effect(() => ctx.tools.register({
@@ -587,6 +605,29 @@ export function apply(ctx) {
       },
     }), `dsh-desktop-manager: ${tool.name}`)
   }
+
+  ctx.inject(['web'], (webCtx) => {
+    webCtx.effect(() => webCtx.web.registerSearchProvider({
+      id: 'dsh-ddg',
+      available: () => true,
+      async search(request) {
+        const hit = await duckduckgo(String(request?.query ?? ''), Number(request?.maxResults) || 8)
+        const sources = (hit.results ?? []).map(item => ({
+          url: item.href,
+          title: item.title || item.href,
+          snippet: item.title || '',
+        }))
+        return {
+          content: hit.snippet || undefined,
+          sources,
+          truncated: false,
+          engine: hit.engine || 'duckduckgo',
+          ok: hit.ok !== false,
+          error: hit.error,
+        }
+      },
+    }), 'dsh-desktop-manager: ddg search provider')
+  })
 
   // PentAGI 原项目工具桥：开启 pentagi 模式后模型直接调 pg_*，不必等 Docker。
   // 有 DSH_PENTAGI_TOKEN 时 flow_* 走 GraphQL；其余工具本机执行（terminal/browser/search/memory）。

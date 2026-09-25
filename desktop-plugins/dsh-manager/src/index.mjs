@@ -516,12 +516,12 @@ export function apply(ctx) {
   // 自觉，模型把「你好」当闲聊就不调工具。这里用 context 在每条用户消息前
   // 注一条硬规则，仅当本会话破甲开启（含 pentagi 模式）时返回非空。
   ctx.effect(() => ctx.systemPrompt.context({
+
     name: 'coldbrew:tool-first',
     order: 299,
     text: (context) => {
       const agent = context?.scope
       const { enabled, mode } = resolveColdbrewState(agent)
-      console.error(`[tool-first-ALWAYS] enabled=${enabled} mode=${mode} agent=${String(agent?.id ?? agent?.session?.id ?? '?').slice(0, 24)}`)
       if (!enabled) return ''
       if (mode === 'pentagi') {
         return '【工具优先】本会话是 PentAGI 渗透席：开头先调用 pg_status 报告后端与可用工具，任务一律先调 pg_* 工具再输出。禁止只把命令写在回复里。'
@@ -529,6 +529,27 @@ export function apply(ctx) {
       return '【工具优先】本会话已开启破甲工具：能调用工具就调用，不要只输出文字方案。'
     },
   }), 'dsh-desktop-manager: coldbrew tool-first context')
+
+  // PentAGI 模式：模型只应使用 pg_* 内核工具。Harness 原生工具（bash/fs/web/
+  // subagent/workflow/todo…）在同一个工具列表里竞争，模型会偏向熟悉的原生工具
+  // 而不是 pg_terminal/pg_search。这里在组装完成后的 waterfall 里按会话模式
+  // 过滤：pentagi 模式只保留 pg_* 与破甲自身工具，让内核工具成为唯一出口。
+  const PENTAGI_KEEP = /^(?:pg_|coldbrew_profiles$|pentagi_profiles$|re_)/u
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    try {
+      const { enabled, mode } = resolveColdbrewState(context?.scope)
+      if (enabled && mode === 'pentagi' && Array.isArray(assembly?.tools)) {
+        const kept = assembly.tools.filter(tool => PENTAGI_KEEP.test(tool.name))
+        if (kept.length > 0 && kept.length < assembly.tools.length) {
+          // 原地替换 tools（waterfall 的 next() 不带参数，重建对象会丢修改）
+          assembly.tools = kept
+        }
+      }
+    } catch {
+      // 组装路径上抛错会打断整个 turn；过滤失败时保留原工具集。
+    }
+    return next()
+  })
 
   // 工具：让模型能取回五个 profile 的元数据与正文（与 infinite_gen1_profile 同型）。
   ctx.effect(() => ctx.tools.register({

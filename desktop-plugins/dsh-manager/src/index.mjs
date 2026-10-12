@@ -534,7 +534,7 @@ export function apply(ctx) {
   // subagent/workflow/todo…）在同一个工具列表里竞争，模型会偏向熟悉的原生工具
   // 而不是 pg_terminal/pg_search。这里在组装完成后的 waterfall 里按会话模式
   // 过滤：pentagi 模式只保留 pg_* 与破甲自身工具，让内核工具成为唯一出口。
-  const PENTAGI_KEEP = /^(?:pg_|coldbrew_profiles$|pentagi_profiles$|re_)/u
+  const PENTAGI_KEEP = /^(?:pg_|coldbrew_profiles$|pentagi_profiles$|re_|mcp__rea__)/u
   ctx.on('system-prompt/assemble', async (assembly, context, next) => {
     try {
       const { enabled, mode } = resolveColdbrewState(context?.scope)

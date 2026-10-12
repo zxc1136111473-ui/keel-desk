@@ -470,6 +470,11 @@ fn checked_plugins(
             "dsh-infinite-gen-1",
             shared_root.join("dsh-infinite-gen-1"),
         ),
+        (
+            "dsh-rea",
+            "dsh-rea",
+            shared_root.join("dsh-rea"),
+        ),
     ]
     .into_iter()
     .filter(|(id, _, directory)| {

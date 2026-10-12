@@ -71,10 +71,10 @@ const bundledPlugins = [
     directory: "dsh-manager",
   },
   {
-    id: "dsh-infinite-gen-1",
-    packageName: "dsh-infinite-gen-1",
+    id: "dsh-rea",
+    packageName: "dsh-rea",
     root: "plugins",
-    directory: "dsh-infinite-gen-1",
+    directory: "dsh-rea",
   },
 ].map((plugin) => ({
   ...plugin,

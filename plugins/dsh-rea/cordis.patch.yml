@@ -1,0 +1,6 @@
+# dsh-rea bundle layer. This Loader row activates the Host half, which mounts
+# the REA MCP server through @deepseek-ai/dsh-mcp-client so the model sees the
+# full reverse-engineering tool catalog as mcp__rea__* native tools.
+- insert:
+    - id: dsh-rea
+      name: dsh-rea

@@ -36,7 +36,7 @@ function runtimeCli() {
   return candidates.find(existsSync)
 }
 
-export function apply(ctx) {
+export async function apply(ctx) {
   const cli = runtimeCli()
   if (!cli) {
     ctx.logger?.warn?.(
@@ -46,7 +46,7 @@ export function apply(ctx) {
   }
   const cwd = dirname(dirname(dirname(cli)))
   ctx.logger?.info?.(`[dsh-rea] mounting REA MCP server (${SERVER_NAME}) at ${cli}`)
-  ctx.plugin(mcpClient, {
+  await ctx.plugin(mcpClient, {
     serverName: SERVER_NAME,
     transport: 'stdio',
     command: process.execPath,
